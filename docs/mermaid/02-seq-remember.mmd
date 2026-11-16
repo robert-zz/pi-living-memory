@@ -1,0 +1,28 @@
+sequenceDiagram
+  autonumber
+  participant M as 模型
+  participant T as remember 工具
+  participant Lock as withFileLockSync
+  participant FS as ~/.pi/agent/memory
+  participant Idx as index.json
+
+  M->>T: kind · subject · text · basis · source · scope
+  T->>T: 校验必填与 basis=inference 的 confidence
+  alt /memory off（paused 标记存在）
+    T-->>M: 拒写：写入已暂停
+  else 正常
+    T->>Idx: 读索引，筛同 kind+subject 的活动行
+    T->>FS: 只读这几条候选的正文（不全库扫描）
+    T->>T: bodySimilar 判是否同一条事实
+    alt 已存在同 subject+kind 的活动条目
+      T-->>M: 拒绝：已有同 subject 的活动条目 id=…，请用 supersede
+    else 无冲突
+      T->>Lock: 建 entries.lock（O_EXCL）
+      T->>FS: 落 recovery/<ts>-<subject>.json 快照
+      T->>FS: 原子写 entries/id.md（tmp + rename）
+      T->>Idx: upsertIndexRow → flushIndex(重取 dirStamp)
+      T->>FS: activity.log 追加 remember 一行
+      T->>Lock: 释放
+      T-->>M: 已记入长期记忆 id=…（status=…）
+    end
+  end

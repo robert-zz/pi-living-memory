@@ -1,0 +1,12 @@
+flowchart TB
+  A[before_agent_start] --> B{LIVING_MEMORY_BRIEF=0?}
+  B -->|是| Z[不注入]
+  B -->|否| C["读四个数据源<br/>index.json · summary-index · todo-index<br/>todo.md 摘要（命中缓存则 0 次读盘）"]
+  C --> D["分流 到期 / 项目 / 待确认 / 全局"]
+  D --> E["逐档取数 5 · 8 · 4 · 5"]
+  E --> Q{"累计 ≤ 2400 字符？<br/>单行 ≤ 130 字符"}
+  Q -->|超出| F["计数 dropped，进页脚"]
+  Q -->|未超| G[拼行]
+  F --> G
+  G --> H["页脚：活动 N · 到期 N · 待确认 N<br/>简报 M/T（N 条未显示）· 待办 N 项"]
+  H --> I[追加到 systemPrompt]

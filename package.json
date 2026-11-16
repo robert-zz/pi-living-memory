@@ -1,6 +1,6 @@
 {
   "name": "pi-living-memory",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Pi extension: durable long-term memory with lifecycle metadata — entries with kind/status/scope/expiry, TODO + SUMMARY docs, derived indexes, and a read-only archive fallback",
   "keywords": [
@@ -19,6 +19,7 @@
   "files": [
     "extensions",
     "tests",
+    "docs",
     "README.md",
     "CHANGELOG.md"
   ],

@@ -1,0 +1,14 @@
+stateDiagram-v2
+  [*] --> explicit: remember basis=explicit
+  [*] --> event: remember basis=event
+  [*] --> inference: remember basis=inference<br/>或抽取器写入
+  inference --> confirmed: confirm（用户点头）
+  inference --> expired: autoTriage A 档<br/>（自指/过程性/被取代）
+  explicit --> superseded: supersede
+  event --> superseded: supersede
+  confirmed --> superseded: supersede
+  explicit --> expired: expire / 到期未续
+  confirmed --> expired: expire / 到期未续
+  expired --> explicit: restore / renew（复活）
+  expired --> [*]: purge_expired（≥30 天，移出热库）
+  superseded --> [*]: 保留在链上，只读

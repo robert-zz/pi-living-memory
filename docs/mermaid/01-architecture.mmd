@@ -1,0 +1,44 @@
+flowchart TB
+  subgraph HOST["pi 宿主"]
+    LOOP[agent loop]
+    TOOLS[tool registry]
+    CMD[slash commands]
+  end
+  subgraph EXT["pi-living-memory 扩展（单文件 2913 行）"]
+    T1[remember]
+    T2["living_memory<br/>9 个 source"]
+    T3["living_memory_update<br/>18 个 action"]
+    C1["/memory<br/>review · pending · todo · profile · on/off"]
+    H1["六个钩子<br/>session_start · before_agent_start<br/>agent_end · agent_settled<br/>session_before_compact · session_shutdown"]
+    W["写入<br/>writeEntry · writeAtomic · withFileLockSync"]
+    R["读取<br/>findEntry · findConflicting · matchesQuery"]
+    G["治理<br/>confirm · supersede · renew · expire<br/>delete · restore · purge · archive"]
+    D["三文档面<br/>todo ops · summary ops · profile"]
+    BR["简报装配<br/>buildBrief · 分档预算"]
+    X["抽取器<br/>runExtraction · 过滤 · 防重"]
+  end
+  subgraph STORE["~/.pi/agent/memory（纯文本，cp -r 可备份）"]
+    E["entries/*.md"]
+    SM["summary.md · summary-archive.md"]
+    TD["todo.md · todo-archive.md"]
+    AUX["expired/ · recovery/<br/>activity.log · extract-failures.jsonl"]
+    PF[profile.md]
+    AR["archive/<br/>旧 MEMORY · SCRATCHPAD · daily"]
+    IDX["index.json · summary-index.json · todo-index.json<br/>（派生索引，删掉可重建）"]
+  end
+  QMD["qmd 只读检索<br/>外部可执行"]
+  CMD --> C1
+  LOOP --> H1
+  TOOLS --> T1 & T2 & T3
+  T1 --> W
+  T2 --> R
+  T3 --> G & D
+  H1 --> BR & X & G
+  W --> E & AUX
+  R --> E & SM & TD
+  G --> AUX & SM & TD
+  D --> SM & TD & PF
+  X --> E & AUX
+  BR --> IDX
+  R --> IDX
+  AR --> QMD

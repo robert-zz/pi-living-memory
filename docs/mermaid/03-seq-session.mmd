@@ -1,0 +1,20 @@
+sequenceDiagram
+  autonumber
+  participant S as session_start
+  participant T as autoTriage(A 档)
+  participant RC as recovery
+  participant Idx as 三个索引
+  participant P as profile.md
+  participant UI as ctx.ui
+
+  S->>T: 只取 status=inference 的活动条目（上限 5 条）
+  Note over T: A1 已被更新的版本取代 / A2 自指或过程性 → expire
+  T-->>UI: notify「自动清理 N 条」（有动作才提示）
+  S->>RC: rotateRecovery(180 天)，仅在有到期快照时动手
+  S->>Idx: purgeCandidates(30) · todoIndex().done · dueRows() · summaryIndex().length
+  S->>S: recentExtractFailures(24)
+  alt 有可提示项（LIVING_MEMORY_START_HINTS≠0）
+    S-->>UI: 「过期 N 条可归档 · 已完成 N 项可归档 · 待办 7 日内到期 · 抽取失败 N 次 · summary 节数超限」
+  end
+  S->>P: refreshProfile(false)（幂等，无变化不写盘）
+  S->>UI: refreshWidget（常驻面板：活动/待确认/待办）

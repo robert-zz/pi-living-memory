@@ -1,0 +1,16 @@
+flowchart TD
+  A[agent_end<br/>暂存本轮消息] --> B[agent_settled]
+  B --> C{aborted? paused? EXTRACT=0?}
+  C -->|是| Z[跳过]
+  C -->|否| D[conversationText 拼正文]
+  D --> E{有 apiKey 与模型?}
+  E -->|否| Z2[记 activity.log：skipped]
+  E -->|是| F[complete：抽取提示词<br/>准入五类 / 禁入清单 / 最多 3 条]
+  F --> G{20s 超时?}
+  G -->|超时| Z3[放弃本次]
+  G -->|正常| H{解析 JSON 数组}
+  H -->|no-json / parse-failed| XF[extract-failures.jsonl<br/>留原文片段]
+  H -->|成功| I[逐条过滤<br/>自指 · 过程性 · 工程实现]
+  I --> J[findConflicting 去重]
+  J --> K[writeEntry status=inference]
+  K --> L[activity.log: auto-extract created]
