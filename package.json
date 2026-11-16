@@ -1,0 +1,45 @@
+{
+  "name": "pi-living-memory",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pi extension: durable long-term memory with lifecycle metadata — entries with kind/status/scope/expiry, TODO + SUMMARY docs, derived indexes, and a read-only archive fallback",
+  "keywords": [
+    "pi-package",
+    "memory",
+    "assistant"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./extensions/living-memory.ts"
+    ],
+    "changelogPath": "./CHANGELOG.md"
+  },
+  "files": [
+    "extensions",
+    "tests",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "test": "bun tests/run.ts",
+    "test:list": "bun tests/run.ts --list"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
+  }
+}
