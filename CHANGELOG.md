@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.7] - 2026-11-17
+
+派生索引加格式版本闸门（A 档追溯本应生效却没跑）。
+
+- `index.json` / `summary-index.json` / `todo-index.json` 现在带 `v` 字段（`IDX_VERSION=2`），读取时必须匹配，否则重建
+- 起因：`toIndexRow` 新增 `confidence` 后，旧索引的 `stamp` 仍然有效（目录没变），于是被继续沿用，A 档读不到置信度 → 静默不转正
+- 测试：`auto-fact-retro` 增加「旧格式索引（无 v、无 confidence）必须被判过期并重建」断言；共 137 断言
 ## [0.1.6] - 2026-11-17
 
 推断自动按事实：A 按已存置信度追溯 + B 证据累积自动转正。

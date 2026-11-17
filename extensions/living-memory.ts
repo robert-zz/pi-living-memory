@@ -224,6 +224,8 @@ function withFileLockSync<T>(file: string, fn: () => T): T {
 }
 type EntryIndex = { id: string; meta: Meta; title: string };
 const INDEX_FILE = path.join(STORE, "index.json");
+/** 派生索引的格式版本：字段或语义变化时递增；stamp 相同不代表格式相同，旧索引一律重建 */
+const IDX_VERSION = 2;
 let indexCache: { stamp: string; rows: EntryIndex[] } | null = null;
 
 function dirStamp(): string {
@@ -256,7 +258,7 @@ function loadEntriesIndex(): EntryIndex[] {
   if (indexCache && indexCache.stamp === stamp) return indexCache.rows;
   try {
     const raw = JSON.parse(fs.readFileSync(INDEX_FILE, "utf8"));
-    if (raw?.stamp === stamp && Array.isArray(raw.rows)) {
+    if (raw?.v === IDX_VERSION && raw?.stamp === stamp && Array.isArray(raw.rows)) {
       indexCache = { stamp, rows: raw.rows as EntryIndex[] };
       return indexCache.rows;
     }
@@ -273,7 +275,7 @@ function loadEntriesIndex(): EntryIndex[] {
   }
   rows.sort((a, b) => (a.id < b.id ? 1 : -1));
   indexCache = { stamp, rows };
-  writeAtomic(INDEX_FILE, JSON.stringify({ stamp, rows }));
+  writeAtomic(INDEX_FILE, JSON.stringify({ v: IDX_VERSION, stamp, rows }));
   return rows;
 }
 
@@ -281,7 +283,7 @@ function loadEntriesIndex(): EntryIndex[] {
 function flushIndex() {
   if (!indexCache) return;
   indexCache.stamp = dirStamp();
-  writeAtomic(INDEX_FILE, JSON.stringify({ stamp: indexCache.stamp, rows: indexCache.rows }));
+  writeAtomic(INDEX_FILE, JSON.stringify({ v: IDX_VERSION, stamp: indexCache.stamp, rows: indexCache.rows }));
 }
 
 const sortRows = (rows: EntryIndex[]) => rows.sort((a, b) => (a.id < b.id ? 1 : -1));
@@ -1287,7 +1289,7 @@ function todoIndex(): { open: TodoRow[]; done: number } {
   if (todoIdxCache && todoIdxCache.stamp === stamp) return todoIdxCache;
   try {
     const raw = JSON.parse(fs.readFileSync(TODO_INDEX_FILE, "utf8"));
-    if (raw?.stamp === stamp && Array.isArray(raw.open)) {
+    if (raw?.v === IDX_VERSION && raw?.stamp === stamp && Array.isArray(raw.open)) {
       todoIdxCache = { stamp, open: raw.open as TodoRow[], done: Number(raw.done ?? 0) };
       return todoIdxCache;
     }
@@ -1296,7 +1298,7 @@ function todoIndex(): { open: TodoRow[]; done: number } {
   }
   const built = buildTodoRows();
   todoIdxCache = { stamp, ...built };
-  writeAtomic(TODO_INDEX_FILE, JSON.stringify({ stamp, ...built }));
+  writeAtomic(TODO_INDEX_FILE, JSON.stringify({ v: IDX_VERSION, stamp, ...built }));
   return todoIdxCache;
 }
 
@@ -1347,7 +1349,7 @@ function summaryIndex(): SummaryRow[] {
   if (summaryIdxCache && summaryIdxCache.stamp === stamp) return summaryIdxCache.rows;
   try {
     const raw = JSON.parse(fs.readFileSync(SUMMARY_INDEX_FILE, "utf8"));
-    if (raw?.stamp === stamp && Array.isArray(raw.rows)) {
+    if (raw?.v === IDX_VERSION && raw?.stamp === stamp && Array.isArray(raw.rows)) {
       summaryIdxCache = { stamp, rows: raw.rows as SummaryRow[] };
       return summaryIdxCache.rows;
     }
@@ -1357,7 +1359,7 @@ function summaryIndex(): SummaryRow[] {
   ensureDirs();
   const rows = buildSummaryRows();
   summaryIdxCache = { stamp, rows };
-  writeAtomic(SUMMARY_INDEX_FILE, JSON.stringify({ stamp, rows }));
+  writeAtomic(SUMMARY_INDEX_FILE, JSON.stringify({ v: IDX_VERSION, stamp, rows }));
   return rows;
 }
 /** 下一个 `### [NN]` 编号 */

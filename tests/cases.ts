@@ -442,6 +442,15 @@ async function body(id: string, home: string) {
       seedEntry("20260101-000000-rtr3", "relation", "0.95", "advice-only", "合作方联系人");
       seedEntry("20260101-000000-rtr4", "decision", "0.95", "needs-confirm", "付款条件");
 
+      // 真实世界的坑：旧格式索引（无 v / 无 confidence）而 stamp 恰好匹配 → 必须判为过期并重建
+      const dir = path.join(mem(home), "entries");
+      const count = fs.readdirSync(dir).filter((f) => f.endsWith(".md")).length;
+      const legacyStamp = `${fs.statSync(dir).mtimeMs}|${count}`;
+      fs.writeFileSync(
+        path.join(mem(home), "index.json"),
+        JSON.stringify({ stamp: legacyStamp, rows: [{ id: "20260101-000000-rtr1", meta: { id: "20260101-000000-rtr1", status: "inference" }, title: "旧索引行" }] }),
+      );
+
       await L.handlers.session_start({ reason: "startup" }, ctx);
       const read1 = (id: string) => fs.readFileSync(path.join(mem(home), "entries", `${id}.md`), "utf8");
       ok("conf 0.9 追溯转为 confirmed", /status: confirmed/.test(read1("20260101-000000-rtr1")), read1("20260101-000000-rtr1").match(/status: \w+/)?.[0]);
@@ -449,6 +458,9 @@ async function body(id: string, home: string) {
       ok("relation 0.95 不追溯", /status: inference/.test(read1("20260101-000000-rtr3")), "");
       ok("needs-confirm 0.95 不追溯", /status: inference/.test(read1("20260101-000000-rtr4")), "");
       ok("开屏提示含自动按事实", /自动按事实处理/.test(ctx.notes.join(" | ")), ctx.notes.join(" | ").slice(0, 60));
+      const idx = JSON.parse(fs.readFileSync(path.join(mem(home), "index.json"), "utf8"));
+      ok("旧格式索引被重建（带 v=2）", idx.v === 2, `v=${idx.v}`);
+      ok("重建后索引含 confidence", idx.rows.some((r: any) => r.id === "20260101-000000-rtr1" && r.meta.confidence === "0.9"), "");
       return;
     }
     case "auto-fact-evidence": {

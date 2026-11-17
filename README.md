@@ -30,7 +30,7 @@ pi install git:github.com/<you>/pi-living-memory@v0.1.0
 ├── todo.md             未完成待办（- [ ]），与 todo-archive.md 分家
 ├── todo-archive.md     已完成待办（按月份归档）
 ├── profile.md          聚合画像（机械统计块由扩展刷新，正文人写）
-├── index.json          entries 派生索引（删掉自动重建，不丢数据）
+├── index.json          entries 派生索引（带 v 格式版本；过期/删掉自动重建，不丢数据）
 ├── summary-index.json  summary.md 目录索引
 ├── todo-index.json     todo.md 派生索引
 ├── extract-failures.jsonl 抽取失败台账（最近 50 条）
