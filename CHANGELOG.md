@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.10] - 2026-11-17
+
+发布卫生：副作用前置、示例去品牌、CI。
+
+- README 顶部新增「装之前请先读：它默认会做的事」——写盘、默认把对话尾部发给**你自己配置的模型**做抽取（`LIVING_MEMORY_EXTRACT=0` 关）、≥0.85 自动转事实、开屏提示；英文摘要同步一行
+- 示例与测试夹具去掉真实项目名（`project:acme`、`/work/acme`），README 本地安装路径泛化为 `/path/to/pi-living-memory`
+- `tests/setup.ts` 依赖解析改为「仓内 node_modules 优先，pi 安装目录兜底」，CI 无需 pi 运行时
+- 新增 `.github/workflows/test.yml`（push / PR 跑 `bun run test`；依赖从 npm 装 typebox 与 `@earendil-works/*`）
+
 ## [0.1.9] - 2026-11-17
 
 画像可一键注入与风格归纳入口。

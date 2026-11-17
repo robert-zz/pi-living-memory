@@ -31,7 +31,7 @@ remember kind=preference subject=用户 代码风格 text="偏好简短回复，
 | `kind` | `preference` / `constraint` / `commitment` / `relation` / `correction` / `decision` / `outcome` |
 | `basis` | `explicit`（用户原话）/ `event`（事实发生）/ `inference`（推断，必须带 `confidence`） |
 | `source` | **日期 + 谁说的 + 原话引用**，将来复核全靠这一行 |
-| `scope` | `global` / `workspace:vault` / `project:vanlife`，多值逗号分隔；决定简报里排在哪一档 |
+| `scope` | `global` / `workspace:vault` / `project:acme`，多值逗号分隔；决定简报里排在哪一档 |
 
 会被拦下的两种情况：
 
@@ -45,7 +45,7 @@ remember kind=preference subject=用户 代码风格 text="偏好简短回复，
 | source | 用途 | 例子 |
 |---|---|---|
 | `entries` | 按元数据或关键词找事实 | `living_memory query=部署 status=confirmed` |
-| `todo` | 未完成待办 + 归档项 | `living_memory source=todo query=vanlife` |
+| `todo` | 未完成待办 + 归档项 | `living_memory source=todo query=acme` |
 | `summary` | 无 `query` 给**目录导航**（按项目分组），有 `query` 读正文 | `living_memory source=summary query=OSS` |
 | `summary-archive` | 已归档的旧小节 | `living_memory source=summary-archive query=dnspod` |
 | `all` | 前三者一起 | `living_memory source=all query=dnssec` |
@@ -86,7 +86,7 @@ remember kind=preference subject=用户 代码风格 text="偏好简短回复，
 
 「简报 14/32」= 32 条可见条目里只有 14 条进了上下文，其余靠检索取。**消失了不等于丢了**。
 
-**干活中**：需要背景时说一句「查一下 vanlife 的技术栈」即可，模型会调 `living_memory`；你纠正事实时，agent 会 `supersede`。
+**干活中**：需要背景时说一句「查一下 acme 的技术栈」即可，模型会调 `living_memory`；你纠正事实时，agent 会 `supersede`。
 
 **收尾**：三句命令把当天沉淀下来 ——
 
@@ -103,7 +103,7 @@ remember kind=preference subject=用户 代码风格 text="偏好简短回复，
 | 记一条用户偏好 | `remember kind=preference subject=用户… basis=explicit …` |
 | 事实变了（旧的不对） | `living_memory_update action=supersede id=<旧id> text="新事实"` |
 | 项目结束了 | `living_memory_update action=expire scope=project:xxx dry_run=false` |
-| 查某项目所有待办 | `living_memory source=todo query=@vanlife` |
+| 查某项目所有待办 | `living_memory source=todo query=@acme` |
 | 今天有什么到期 | `living_memory due=true` |
 | SUMMARY 太长 | `living_memory_update action=summary_archive keep=60` |
 | 归档区里翻旧账 | `living_memory source=archive query="某个词"` |

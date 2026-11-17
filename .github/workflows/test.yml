@@ -1,0 +1,21 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Resolve host dependencies (typebox / @earendil-works/*)
+        run: |
+          npm install --no-save typebox @earendil-works/pi-ai @earendil-works/pi-coding-agent eslint
+      - name: Run tests
+        run: bun run test

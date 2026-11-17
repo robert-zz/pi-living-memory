@@ -59,7 +59,7 @@ async function body(id: string, home: string) {
   switch (id) {
     case "brief": {
       const L = await load(home, AUTO_OFF);
-      const ctx = mkCtx("/work/vanlife");
+      const ctx = mkCtx("/work/acme");
       await L.handlers.session_start({ reason: "startup" }, ctx);
       const r: any = await L.handlers.before_agent_start({ systemPrompt: "BASE" }, ctx);
       const txt = String(r?.systemPrompt ?? "");
@@ -74,7 +74,7 @@ async function body(id: string, home: string) {
     }
     case "brief-optout": {
       const L = await load(home, { LIVING_MEMORY_BRIEF: "0", ...AUTO_OFF });
-      const ctx = mkCtx("/work/vanlife");
+      const ctx = mkCtx("/work/acme");
       const r: any = await L.handlers.before_agent_start({ systemPrompt: "BASE" }, ctx);
       ok("不注入（返回空/undefined）", !r || r.systemPrompt === undefined || r.systemPrompt === "BASE", JSON.stringify(r ?? null).slice(0, 40));
       return;
@@ -82,7 +82,7 @@ async function body(id: string, home: string) {
     case "brief-readbudget": {
       const c = counter();
       const L = await load(home, AUTO_OFF); // 索引冷建在加载期，不计入简报
-      const ctx = mkCtx("/work/vanlife");
+      const ctx = mkCtx("/work/acme");
       c.start();
       await L.handlers.before_agent_start({ systemPrompt: "" }, ctx);
       const hits = c.stop();
@@ -177,16 +177,16 @@ async function body(id: string, home: string) {
       };
       const soon = day(2);
       const late = day(-1);
-      await L.call("living_memory_update", { action: "todo_add", text: "结构待办己：标记写入", section: "测试项目 A", project: "vanlife", tags: "p2,dns", due: soon });
+      await L.call("living_memory_update", { action: "todo_add", text: "结构待办己：标记写入", section: "测试项目 A", project: "acme", tags: "p2,dns", due: soon });
       const line = (read(home, "todo.md").split("\n").find((l) => l.includes("结构待办己")) ?? "").trim();
-      ok("行尾写入 @project #tag due:", line.endsWith(`@vanlife #p2 #dns due:${soon}`), line);
+      ok("行尾写入 @project #tag due:", line.endsWith(`@acme #p2 #dns due:${soon}`), line);
       const bad = out(await L.call("living_memory_update", { action: "todo_add", text: "结构待办坏：日期非法", due: "2026/12/01" }));
       ok("非法 due 被拒", /YYYY-MM-DD/.test(bad) && !read(home, "todo.md").includes("结构待办坏"), bad.slice(0, 60));
-      await L.call("living_memory_update", { action: "todo_add", text: "结构待办庚：已逾期", project: "vanlife", tags: "p0", due: late });
+      await L.call("living_memory_update", { action: "todo_add", text: "结构待办庚：已逾期", project: "acme", tags: "p0", due: late });
       ok("逾期日期可写", read(home, "todo.md").includes(`due:${late}`) && read(home, "todo.md").includes("#p0"));
-      const q1 = out(await L.call("living_memory", { source: "todo", query: "@vanlife" }));
+      const q1 = out(await L.call("living_memory", { source: "todo", query: "@acme" }));
       ok("按 @project 筛", q1.includes("结构待办己") && q1.includes("结构待办庚") && !q1.includes("待办甲"), q1.split("\n")[0]);
-      const q2 = out(await L.call("living_memory", { source: "todo", query: "@vanlife #p0" }));
+      const q2 = out(await L.call("living_memory", { source: "todo", query: "@acme #p0" }));
       ok("按 #tag 叠加筛", q2.includes("结构待办庚") && !q2.includes("结构待办己"), q2.split("\n")[0]);
       const q3 = out(await L.call("living_memory", { source: "todo", query: "due:overdue" }));
       ok("due:overdue 只命中逾期", q3.includes("结构待办庚") && !q3.includes("结构待办己"), q3.split("\n")[0]);
@@ -194,7 +194,7 @@ async function body(id: string, home: string) {
       ok("due:soon 覆盖 7 日内与逾期", q4.includes("结构待办己") && q4.includes("结构待办庚"), q4.split("\n")[0]);
       const q5 = out(await L.call("living_memory", { source: "todo", query: "due:2099-01-01" }));
       ok("due:具体日期无命中", !q5.includes("结构待办己") && /命中 0/.test(q5), q5.split("\n")[0]);
-      const ctx = mkCtx("/work/vanlife");
+      const ctx = mkCtx("/work/acme");
       await L.handlers.session_start({ reason: "startup" }, ctx);
       const r: any = await L.handlers.before_agent_start({ systemPrompt: "BASE" }, ctx);
       const brief = String(r?.systemPrompt ?? "");
@@ -265,7 +265,7 @@ async function body(id: string, home: string) {
       ok("删索引后检索仍可用", q.includes("测试决策甲"), q.split("\n")[0].slice(0, 40));
       ok("index.json 按需重建", exists(home, "index.json") && JSON.parse(read(home, "index.json")).rows.length >= 2);
       const before = read(home, "todo.md");
-      await L.handlers.before_agent_start({ systemPrompt: "" }, mkCtx("/work/vanlife"));
+      await L.handlers.before_agent_start({ systemPrompt: "" }, mkCtx("/work/acme"));
       ok("todo-index 按需重建（简报触发）", exists(home, "todo-index.json") && read(home, "todo.md") === before);
       await L.call("living_memory", { source: "summary" });
       ok("summary-index 按需重建", exists(home, "summary-index.json"));
@@ -287,12 +287,12 @@ async function body(id: string, home: string) {
       const L = await load(home, AUTO_OFF);
       // 已过期的条目要先真的落到 expired/ 才算“可归档候选”
       await L.call("living_memory_update", { action: "expire", id: "20260101-000002-c3d4" });
-      const ctx = mkCtx("/work/vanlife");
+      const ctx = mkCtx("/work/acme");
       await L.handlers.session_start({ reason: "startup" }, ctx);
       const notes = ctx.notes.join(" | ");
       ok("提示过期可归档", /过期 \d+ 条可归档/.test(notes), notes.slice(0, 80));
       ok("提示已完成待办可归档", /已完成 \d+ 项可归档/.test(notes));
-      const ctx2 = mkCtx("/work/vanlife");
+      const ctx2 = mkCtx("/work/acme");
       const L2 = await load(home, { LIVING_MEMORY_START_HINTS: "0", ...AUTO_OFF });
       await L2.handlers.session_start({ reason: "startup" }, ctx2);
       ok("START_HINTS=0 静默", ctx2.notes.length === 0, ctx2.notes.join("|"));
@@ -309,7 +309,7 @@ async function body(id: string, home: string) {
       ok("改名后内容还在", read(home, "summary.md").includes("大写遗留") && read(home, "todo.md").includes("遗留项"));
       // ② 大小写并存：模拟出“陈旧实例写回来的”孪生文件，session_start 按需探测并提示人工合并
       fs.writeFileSync(path.join(mem(home), "SUMMARY.md"), "# summary\n\n### [1] 陈旧写入\n");
-      const ctx = mkCtx("/work/vanlife");
+      const ctx = mkCtx("/work/acme");
       await L.handlers.session_start({ reason: "startup" }, ctx);
       ok("session_start 提示人工合并", ctx.notes.join("|").includes("大写孪生文件 SUMMARY.md"), ctx.notes.join("|").slice(0, 80));
       // ③ 孪生文件本身不被吞掉（人工要能核对内容）
@@ -357,7 +357,7 @@ async function body(id: string, home: string) {
         "# 画像\n\n## 三、对外口径\n\n> 本节会被压缩注入简报，只留一般口径（`20260101-000000-aaa`）\n\n- **对外文档用中文**，代码与提交信息用英文（`20260101-000000-bbb`）。\n- 报价与承诺先内部确认再对外（`20260101-000000-ccc`）。\n\n## 四、沟通与协作习惯\n\n- 先给结论，再给依据；不喜欢铺垫。\n- 表格优先于长段落。\n\n## 五、空白与待证\n\n- 暂无\n",
       );
       const L = await load(home, AUTO_OFF);
-      const ctx = mkCtx("/work/vanlife");
+      const ctx = mkCtx("/work/acme");
       await L.handlers.session_start({ reason: "startup" }, ctx);
       const off: any = await L.handlers.before_agent_start({ systemPrompt: "BASE" }, ctx);
       ok("默认不注入画像", !String(off?.systemPrompt ?? "").includes("· 画像"), String(off?.systemPrompt ?? "").length);
@@ -376,7 +376,7 @@ async function body(id: string, home: string) {
     }
     case "auto-fact": {
       const L = await load(home, AUTO_OFF);
-      const ctx = mkCtx("/work/vanlife");
+      const ctx = mkCtx("/work/acme");
 
       // ① 0.9 → 直接按事实（confirmed）
       const r1 = out(await L.call("remember", { kind: "preference", subject: "报告风格", text: "报告一律先给结论。", basis: "inference", confidence: 0.9, source: "fixture 高置信" }, ctx));
@@ -409,7 +409,7 @@ async function body(id: string, home: string) {
     }
     case "auto-fact-retro": {
       const L = await load(home, AUTO_OFF);
-      const ctx = mkCtx("/work/vanlife");
+      const ctx = mkCtx("/work/acme");
       const seedEntry = (id: string, kind: string, conf: string, impact = "advice-only", subject = "报告风格") => {
         const dir = path.join(mem(home), "entries");
         fs.writeFileSync(
@@ -465,7 +465,7 @@ async function body(id: string, home: string) {
     }
     case "auto-fact-evidence": {
       const L = await load(home, AUTO_OFF);
-      const ctx = mkCtx("/work/vanlife");
+      const ctx = mkCtx("/work/acme");
       const withEvidence = (id: string, conf: string, ev: Array<{ at: string; kind: string; id?: string }>) => {
         const dir = path.join(mem(home), "entries");
         fs.writeFileSync(
@@ -513,7 +513,7 @@ async function body(id: string, home: string) {
       // 关闭开关后不再自动转（用同一库再跑一次应在提示里无声）
       const off = { ...AUTO_OFF, LIVING_MEMORY_AUTO_FACT_EVIDENCE: "0" };
       const L2 = await load(home, off);
-      const ctx2 = mkCtx("/work/vanlife");
+      const ctx2 = mkCtx("/work/acme");
       await L2.handlers.session_start({ reason: "startup" }, ctx2);
       ok("开关 0 时不提示自动按事实", !/自动按事实处理/.test(ctx2.notes.join(" | ")), ctx2.notes.join(" | ").slice(0, 40));
       return;
@@ -523,7 +523,7 @@ async function body(id: string, home: string) {
       writeEntry(home, { id: "20260101-000000-nnn1", kind: "preference", subject: "汇报口径", body: "汇报口径：先说结论，细节放后面。" });
       writeEntry(home, { id: "20260101-000000-nnn2", kind: "constraint", subject: "对外邮件", body: "对外邮件：不要抄送无关的人，别把内部猜测写进去。" });
       writeEntry(home, { id: "20260101-000000-nnn3", kind: "constraint", subject: "代码提交", body: "代码提交：禁止把 debug 代码一起提交。" });
-      const ctx = mkCtx("/work/vanlife");
+      const ctx = mkCtx("/work/acme");
       await L.handlers.session_start({ reason: "startup" }, ctx);
       const r: any = await L.handlers.before_agent_start({ systemPrompt: "BASE" }, ctx);
       const txt = String(r?.systemPrompt ?? "");
@@ -565,7 +565,7 @@ async function body(id: string, home: string) {
       ok("按原因分类计数", /request-failed 1/.test(t) && /parse-failed 1/.test(t), t.match(/（[^）]*）/)?.[0]);
       ok("明细含原文片段", t.includes("429 Too Many Requests") && t.includes("JSON 解析失败"));
       ok("对照最近一次成功", /最近一次成功\/跳过/.test(t) && t.includes("auto-extract created"));
-      const ctx = mkCtx("/work/vanlife");
+      const ctx = mkCtx("/work/acme");
       await L.handlers.session_start({ reason: "startup" }, ctx);
       const hint = ctx.notes.join(" | ");
       ok("开屏提示含失败次数", /抽取 24h 内失败 2 次/.test(hint), hint.slice(0, 80));

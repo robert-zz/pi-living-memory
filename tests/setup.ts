@@ -16,8 +16,10 @@ export const SRC = process.env.LIVING_MEMORY_SRC
   ? path.resolve(process.env.LIVING_MEMORY_SRC)
   : (fs.existsSync(PKG_SRC) ? PKG_SRC : HOME_SRC);
 
-/** 找最新一个带 node_modules 的 pi 安装目录（不写死版本号） */
+/** 找依赖：优先仓内 node_modules（CI / 贡献者），其次最新一个带 node_modules 的 pi 安装目录（本地免装） */
 function findDeps(): string | null {
+  const local = path.join(TESTS_DIR, "..", "node_modules");
+  if (fs.existsSync(path.join(local, "typebox"))) return local;
   const root = path.join(os.homedir(), ".pi", "agent", "install", "releases");
   if (!fs.existsSync(root)) return null;
   const rels = fs

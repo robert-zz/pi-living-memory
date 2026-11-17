@@ -16,7 +16,7 @@ export const out = (r: any): string => {
   return String(r);
 };
 
-export function mkCtx(cwd = "/work/vanlife", opts: { hasUI?: boolean; confirm?: boolean } = {}) {
+export function mkCtx(cwd = "/work/acme", opts: { hasUI?: boolean; confirm?: boolean } = {}) {
   const notes: string[] = [];
   const ctx = {
     cwd,
@@ -164,7 +164,7 @@ export function seed(home: string, kind: Seed = "basic") {
     id: "20260101-000002-c3d4",
     kind: "constraint",
     subject: "测试约束乙",
-    scope: "global,project:vanlife",
+    scope: "global,project:acme",
     expires_at: "2026-01-02T00:00:00.000Z", // 已过期（今天 2026-11-16）
     review_after: "2026-01-03",
     body: "测试约束乙正文：到期档验证。",

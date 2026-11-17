@@ -32,7 +32,7 @@ bun run.ts --list       # 列出用例
 
 | 用例 | 关键断言 |
 |---|---|
-| `brief` | 分档顺序（到期 > 项目 > 待确认 > 全局）、≤2400 字符、页脚计数、`project:vanlife` 命中 |
+| `brief` | 分档顺序（到期 > 项目 > 待确认 > 全局）、≤2400 字符、页脚计数、`project:acme` 命中 |
 | `brief-optout` | `LIVING_MEMORY_BRIEF=0` → 不注入 |
 | `brief-readbudget` | 简报读盘 0 次（只读索引，不碰正文） |
 | `remember` | 写盘 + 索引行同步 + 回包格式；同 `subject+kind` 且正文相近 → 拦截并给旧 id |
@@ -52,7 +52,7 @@ bun run.ts --list       # 列出用例
 | `profile` | STATS 块刷新、正文不被覆盖、第二次幂等不写盘 |
 | `lock` | 两进程各写 8 条待办 → 16/16 全在、无重复、原有条目不丢 |
 | `extract-fail` | `source=extract` 汇总 7 天失败、按原因计数、带原文片段与「最近一次成功」；24h 内有失败时开屏提示 |
-| `todo-structured` | `@project`/`#tag`/`due:` 写到行尾；非法日期被拒；`query="@vanlife"`、`#p0`、`due:overdue|soon|YYYY-MM-DD` 筛选；简报「待办到期」行与页脚计数 |
+| `todo-structured` | `@project`/`#tag`/`due:` 写到行尾；非法日期被拒；`query="@acme"`、`#p0`、`due:overdue|soon|YYYY-MM-DD` 筛选；简报「待办到期」行与页脚计数 |
 
 ## 加一个用例
 

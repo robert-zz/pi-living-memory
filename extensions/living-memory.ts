@@ -982,7 +982,7 @@ function inScope(e: { meta: Meta }, cwd?: string): boolean {
   if (!cwd) return true; // 拿不到 cwd 时宁多勿漏
   const base = path.basename(cwd);
   if (!base) return true;
-  // 逐 token 精确比对（旧版 s.includes(base) 会让 keqiz 误配 keqiz.com）
+  // 逐 token 精确比对（旧版 s.includes(base) 会让 acme 误配 acme.com）
   return s
     .split(",")
     .map((t) => t.trim().replace(/^(?:workspace|project):/, ""))
@@ -2418,7 +2418,7 @@ export default function (pi: ExtensionAPI) {
     ],
     parameters: Type.Object({
       kind: StringEnum(KINDS),
-      subject: Type.String({ description: "主体：说谁/什么（如 用户、张三、yangsheng 项目）" }),
+      subject: Type.String({ description: "主体：说谁/什么（如 用户、张三、acme 项目）" }),
       text: Type.String({ description: "记忆正文（1-3 句事实本身；含原话则引用）" }),
       basis: StringEnum(["explicit", "event", "inference"]),
       source: Type.String({ description: "来源：日期+会话/谁说的/原话" }),
@@ -2624,7 +2624,7 @@ export default function (pi: ExtensionAPI) {
       body: Type.Optional(Type.String({ description: "summary_add/summary_update 必填：小节正文，按 `- ` 条目写入，不要带标题行" })),
       older_than_days: Type.Optional(Type.Number({ description: "purge_expired 可选：只清理距今 ≥ 该天数的 expired/superseded 条目，默认 30" })),
       dry_run: Type.Optional(Type.Boolean({ description: "purge_expired 可选：默认 true 只列候选；传 false 才真正移动文件" })),
-      scope: Type.Optional(Type.String({ description: "批量 expire 可选：按 scope 精确选择（如 project:vanlife）" })),
+      scope: Type.Optional(Type.String({ description: "批量 expire 可选：按 scope 精确选择（如 project:acme）" })),
       subject_contains: Type.Optional(Type.String({ description: "批量 expire 可选：subject 包含该子串（如「记忆」）" })),
       kind: Type.Optional(StringEnum(KINDS, { description: "批量 expire 可选：按类别选择" })),
       keep: Type.Optional(Type.Number({ description: "summary_archive 可选：活动 summary.md 保留多少个最新小节，默认 60（LIVING_MEMORY_SUMMARY_KEEP 可改）" })),
