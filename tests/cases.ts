@@ -4,7 +4,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { mem, mkCtx, load, out, counter } from "./harness.ts";
+import { mem, mkCtx, load, out, counter, writeEntry } from "./harness.ts";
 import type { Seed } from "./harness.ts";
 
 export type Meta = { id: string; title: string; seed: Seed };
@@ -31,6 +31,13 @@ export const CASES: Meta[] = [
   { id: "profile", title: "画像：STATS 块刷新 + 幂等不写盘", seed: "basic" },
   { id: "lock", title: "并发：两进程各加 8 条待办不互相覆盖", seed: "basic" },
   { id: "extract-fail", title: "抽取：失败可见（source=extract + 开屏提示）", seed: "basic" },
+  { id: "promote", title: "转正：证据累积 + 复合分门槛", seed: "basic" },
+  { id: "profile-brief", title: "画像：默认不注入，开关后压成一行", seed: "basic" },
+  { id: "negation", title: "简报：雷区条目优先并打标", seed: "basic" },
+  { id: "style-scan", title: "归纳：style_scan 出候选并落戳", seed: "basic" },
+  { id: "auto-fact", title: "推断：置信度 ≥0.85 自动按事实，低于降为弱参考", seed: "basic" },
+  { id: "auto-fact-retro", title: "推断：A 会话启动按已存 confidence 追溯转事实", seed: "basic" },
+  { id: "auto-fact-evidence", title: "推断：B 证据 ≥3 天且分 ≥0.8 自动转事实", seed: "basic" },
 ];
 
 const checks: Array<{ name: string; ok: boolean; detail?: string }> = [];
@@ -320,6 +327,211 @@ async function body(id: string, home: string) {
       const before = p1;
       const r2 = out(await L.call("living_memory_update", { action: "profile_rebuild", dry_run: false }));
       ok("幂等：第二次不写盘", read(home, "profile.md") === before || /无变化/.test(r2), r2.slice(0, 40));
+      return;
+    }
+    case "promote": {
+      // 本用例专门验证「推断 → 转正候选」链路，故把自动按事实门槛抬高，让 0.85 仍是推断
+      const L = await load(home, { ...AUTO_OFF, LIVING_MEMORY_AUTO_FACT: "0.95" });
+      const T = "转正主题：部署一律先跑测试。";
+      const r1 = out(await L.call("remember", { kind: "preference", subject: "转正主题", text: T, basis: "inference", confidence: 0.85, source: "test-s1" }));
+      const id = r1.match(/(\d{8}-\d{6}-\w{4})/)?.[1] ?? "";
+      ok("推断写入成功", !!id && r1.includes("已记入"), r1.split("\n")[0].slice(0, 40));
+      const r2 = out(await L.call("remember", { kind: "preference", subject: "转正主题", text: T, basis: "inference", confidence: 0.85, source: "test-s1" }));
+      ok("同日同源去重", !r2.includes("已记入"), r2.split("\n")[0].slice(0, 40));
+      const r2b = out(await L.call("remember", { kind: "preference", subject: "转正主题", text: T, basis: "inference", confidence: 0.85, source: "test-s1" }));
+      ok("同源同日再次出现不再加证据", r2b.includes("已有同 subject+kind"), r2b.split("\n")[0].slice(0, 40));
+      const r3 = out(await L.call("remember", { kind: "preference", subject: "转正主题", text: T, basis: "inference", confidence: 0.85, source: "test-s2" }));
+      ok("异源记证据", r3.includes("证据 +1"), r3.split("\n")[0].slice(0, 50));
+      const r4 = out(await L.call("remember", { kind: "preference", subject: "转正主题", text: T, basis: "explicit", source: "user" }));
+      ok("原话重述记 restate", r4.includes("restate"), r4.split("\n")[0].slice(0, 50));
+      const scan = out(await L.call("living_memory_update", { action: "promote_scan", match: "5" }));
+      ok("扫描列出该条", scan.includes(id), scan.split("\n")[0].slice(0, 40));
+      ok("越过门槛标记可转正", scan.includes("可转正"), scan.match(/[0-9.]+ 可转正[^\n]{0,20}/)?.[0]);
+      const ent = read(home, `entries/${id}.md`);
+      ok("evidence 落进 frontmatter", /evidence: .*"restate"/.test(ent), (ent.match(/evidence: [^\n]{0,40}/) ?? [""])[0].slice(0, 60));
+      return;
+    }
+    case "profile-brief": {
+      fs.writeFileSync(
+        path.join(mem(home), "profile.md"),
+        "# 画像\n\n## 三、对外口径\n\n> 本节会被压缩注入简报，只留一般口径（`20260101-000000-aaa`）\n\n- **对外文档用中文**，代码与提交信息用英文（`20260101-000000-bbb`）。\n- 报价与承诺先内部确认再对外（`20260101-000000-ccc`）。\n\n## 四、沟通与协作习惯\n\n- 先给结论，再给依据；不喜欢铺垫。\n- 表格优先于长段落。\n\n## 五、空白与待证\n\n- 暂无\n",
+      );
+      const L = await load(home, AUTO_OFF);
+      const ctx = mkCtx("/work/vanlife");
+      await L.handlers.session_start({ reason: "startup" }, ctx);
+      const off: any = await L.handlers.before_agent_start({ systemPrompt: "BASE" }, ctx);
+      ok("默认不注入画像", !String(off?.systemPrompt ?? "").includes("· 画像"), String(off?.systemPrompt ?? "").length);
+      process.env.LIVING_MEMORY_PROFILE_BRIEF = "1";
+      const on: any = await L.handlers.before_agent_start({ systemPrompt: "BASE" }, ctx);
+      const txt = String(on?.systemPrompt ?? "");
+      ok("开启后注入画像行", txt.includes("· 画像："), txt.match(/· 画像：[^\n]{0,30}/)?.[0]);
+      ok("画像含第三/四节结论", /英文|先给结论/.test(txt), txt.match(/· 画像：.{0,60}/)?.[0]);
+      ok("画像不含空占位", !/· 画像：[^\n]*暂无/.test(txt));
+      const line = txt.split("\n").find((l) => l.includes("· 画像：" )) ?? "";
+      ok("画像行剥掉引用与 markdown 装饰", !/[>*]|`/.test(line), line.slice(0, 60));
+      ok("画像行去掉证据 id 括号", !/20\d{6}/.test(line), line.slice(0, 60));
+      ok("画像行不超 200 字", line.length - 5 <= 200, `${line.length - 5} 字`);
+      delete process.env.LIVING_MEMORY_PROFILE_BRIEF;
+      return;
+    }
+    case "auto-fact": {
+      const L = await load(home, AUTO_OFF);
+      const ctx = mkCtx("/work/vanlife");
+
+      // ① 0.9 → 直接按事实（confirmed）
+      const r1 = out(await L.call("remember", { kind: "preference", subject: "报告风格", text: "报告一律先给结论。", basis: "inference", confidence: 0.9, source: "fixture 高置信" }, ctx));
+      ok("0.9 自动按事实", /status=confirmed/.test(r1), r1.split("\n")[0]);
+      const e1 = L.findEntry ? null : null;
+      const file1 = fs.readdirSync(path.join(mem(home), "entries")).find((f: string) => f.startsWith("2026") );
+      const txt1 = fs.readFileSync(path.join(mem(home), "entries", file1), "utf8");
+      ok("落盘 status=confirmed", /status: confirmed/.test(txt1), file1);
+      ok("confirmed_at 已填", /confirmed_at: 2026/.test(txt1), "");
+
+      // ② 0.6 → 仍是推断（弱参考）
+      const r2 = out(await L.call("remember", { kind: "preference", subject: "会议习惯", text: "会议纪要当天发。", basis: "inference", confidence: 0.6, source: "fixture 低置信" }, ctx));
+      ok("0.6 保留推断", /status=inference/.test(r2), r2.split("\n")[0]);
+      ok("回包说明弱参考", /弱参考/.test(r2), "");
+
+      // ③ relation 即使 0.95 也不自动转事实
+      const r3 = out(await L.call("remember", { kind: "relation", subject: "合作方联系人", text: "对方偏好邮件沟通。", basis: "inference", confidence: 0.95, source: "fixture 关系" }, ctx));
+      ok("relation 不自动转事实", /status=inference/.test(r3), r3.split("\n")[0]);
+
+      // ④ needs-confirm 即使 0.95 也不自动转事实
+      const r4 = out(await L.call("remember", { kind: "decision", subject: "付款条件", text: "付款改为预付 30%。", basis: "inference", confidence: 0.95, action_impact: "needs-confirm", source: "fixture 需确认" }, ctx));
+      ok("needs-confirm 不自动转事实", /status=inference/.test(r4), r4.split("\n")[0]);
+
+      // ⑤ 简报：低于门槛的推断出现在「推断·弱」档
+      const b: any = await L.handlers.before_agent_start({ systemPrompt: "BASE" }, ctx);
+      const bt = String(b?.systemPrompt ?? "");
+      ok("简报标出推断·弱", bt.includes("[推断·弱]"), bt.split("\n").find((l) => l.includes("推断·弱")) ?? "");
+      ok("简报不再用宽泛的待确认档位", !/^\[待确认\]/m.test(bt), "");
+      return;
+    }
+    case "auto-fact-retro": {
+      const L = await load(home, AUTO_OFF);
+      const ctx = mkCtx("/work/vanlife");
+      const seedEntry = (id: string, kind: string, conf: string, impact = "advice-only", subject = "报告风格") => {
+        const dir = path.join(mem(home), "entries");
+        fs.writeFileSync(
+          path.join(dir, `${id}.md`),
+          [
+            "---",
+            `id: ${id}`,
+            `kind: ${kind}`,
+            "status: inference",
+            `subject: ${subject}`,
+            "scope: global",
+            "source: fixture 存量推断",
+            "obtained_at: 2026-01-01T00:00:00.000Z",
+            "confirmed_at: ",
+            "expires_at: ",
+            "review_after: 2026-12-01",
+            `confidence: ${conf}`,
+            `action_impact: ${impact}`,
+            "supersedes: ",
+            "evidence: ",
+            "---",
+            "",
+            `${subject}：先给结论再给依据。`,
+            "",
+          ].join("\n"),
+        );
+      };
+      seedEntry("20260101-000000-rtr1", "preference", "0.9");
+      seedEntry("20260101-000000-rtr2", "decision", "0.6", "advice-only", "会议习惯");
+      seedEntry("20260101-000000-rtr3", "relation", "0.95", "advice-only", "合作方联系人");
+      seedEntry("20260101-000000-rtr4", "decision", "0.95", "needs-confirm", "付款条件");
+
+      await L.handlers.session_start({ reason: "startup" }, ctx);
+      const read1 = (id: string) => fs.readFileSync(path.join(mem(home), "entries", `${id}.md`), "utf8");
+      ok("conf 0.9 追溯转为 confirmed", /status: confirmed/.test(read1("20260101-000000-rtr1")), read1("20260101-000000-rtr1").match(/status: \w+/)?.[0]);
+      ok("conf 0.6 仍是 inference", /status: inference/.test(read1("20260101-000000-rtr2")), "");
+      ok("relation 0.95 不追溯", /status: inference/.test(read1("20260101-000000-rtr3")), "");
+      ok("needs-confirm 0.95 不追溯", /status: inference/.test(read1("20260101-000000-rtr4")), "");
+      ok("开屏提示含自动按事实", /自动按事实处理/.test(ctx.notes.join(" | ")), ctx.notes.join(" | ").slice(0, 60));
+      return;
+    }
+    case "auto-fact-evidence": {
+      const L = await load(home, AUTO_OFF);
+      const ctx = mkCtx("/work/vanlife");
+      const withEvidence = (id: string, conf: string, ev: Array<{ at: string; kind: string; id?: string }>) => {
+        const dir = path.join(mem(home), "entries");
+        fs.writeFileSync(
+          path.join(dir, `${id}.md`),
+          [
+            "---",
+            `id: ${id}`,
+            "kind: preference",
+            "status: inference",
+            `subject: 汇报口径 ${id.slice(-4)}`,
+            "scope: global",
+            "source: fixture 证据累积",
+            "obtained_at: 2026-01-01T00:00:00.000Z",
+            "confirmed_at: ",
+            "expires_at: ",
+            "review_after: 2026-12-01",
+            `confidence: ${conf}`,
+            "action_impact: advice-only",
+            "supersedes: ",
+            `evidence: ${JSON.stringify(ev)}`,
+            "---",
+            "",
+            "汇报先给结论，细节放后面（无含糊词）。",
+            "",
+          ].join("\n"),
+        );
+      };
+      // 三天 repeat + 一次 restate → 分 ≥0.8，应自动成事实
+      withEvidence("20260101-000000-evd1", "0.6", [
+        { at: "2026-01-01T00:00:00.000Z", kind: "repeat", id: "s1" },
+        { at: "2026-01-02T00:00:00.000Z", kind: "repeat", id: "s2" },
+        { at: "2026-01-03T00:00:00.000Z", kind: "restate", id: "s3" },
+      ]);
+      // 只有两天、无 restate → 分不够，保持推断
+      withEvidence("20260101-000000-evd2", "0.6", [
+        { at: "2026-01-01T00:00:00.000Z", kind: "repeat", id: "s1" },
+        { at: "2026-01-02T00:00:00.000Z", kind: "repeat", id: "s2" },
+      ]);
+
+      await L.handlers.session_start({ reason: "startup" }, ctx);
+      const read1 = (id: string) => fs.readFileSync(path.join(mem(home), "entries", `${id}.md`), "utf8");
+      ok("证据≥3天且分够→confirmed", /status: confirmed/.test(read1("20260101-000000-evd1")), "");
+      ok("两天证据仍为 inference", /status: inference/.test(read1("20260101-000000-evd2")), "");
+      ok("记录 auto-fact evidence", /auto-fact evidence/.test(fs.readFileSync(path.join(mem(home), "activity.log"), "utf8")), "");
+      // 关闭开关后不再自动转（用同一库再跑一次应在提示里无声）
+      const off = { ...AUTO_OFF, LIVING_MEMORY_AUTO_FACT_EVIDENCE: "0" };
+      const L2 = await load(home, off);
+      const ctx2 = mkCtx("/work/vanlife");
+      await L2.handlers.session_start({ reason: "startup" }, ctx2);
+      ok("开关 0 时不提示自动按事实", !/自动按事实处理/.test(ctx2.notes.join(" | ")), ctx2.notes.join(" | ").slice(0, 40));
+      return;
+    }
+    case "negation": {
+      const L = await load(home, AUTO_OFF);
+      writeEntry(home, { id: "20260101-000000-nnn1", kind: "preference", subject: "汇报口径", body: "汇报口径：先说结论，细节放后面。" });
+      writeEntry(home, { id: "20260101-000000-nnn2", kind: "constraint", subject: "对外邮件", body: "对外邮件：不要抄送无关的人，别把内部猜测写进去。" });
+      writeEntry(home, { id: "20260101-000000-nnn3", kind: "constraint", subject: "代码提交", body: "代码提交：禁止把 debug 代码一起提交。" });
+      const ctx = mkCtx("/work/vanlife");
+      await L.handlers.session_start({ reason: "startup" }, ctx);
+      const r: any = await L.handlers.before_agent_start({ systemPrompt: "BASE" }, ctx);
+      const txt = String(r?.systemPrompt ?? "");
+      ok("雷区行带 [雷区] 标记", txt.includes("[雷区]"), txt.match(/\[雷区\][^\n]{0,30}/)?.[0]);
+      const iNeg = txt.indexOf("[雷区]");
+      const iPlain = txt.indexOf("汇报口径");
+      ok("雷区排在普通偏好之前", iNeg >= 0 && (iPlain < 0 || iNeg < iPlain), `${iNeg}/${iPlain}`);
+      ok("雷区条数与命中一致", (txt.match(/\[雷区\]/g) ?? []).length >= 2, (txt.match(/\[雷区\]/g) ?? []).length);
+      return;
+    }
+    case "style-scan": {
+      const L = await load(home, AUTO_OFF);
+      await L.call("remember", { kind: "constraint", subject: "对外邮件", text: "对外邮件：不要抄送无关的人。", basis: "explicit", source: "test" });
+      await L.call("remember", { kind: "preference", subject: "回复风格", text: "回复风格：先给结论，再给依据。", basis: "explicit", source: "test" });
+      const r = out(await L.call("living_memory_update", { action: "style_scan", match: "30" }));
+      ok("列出窗口内条目数", /近 30 天：活动条目新增\/更新 \d+ 条/.test(r), r.split("\n")[0].slice(0, 50));
+      ok("雷区小节出现", r.includes("雷区"), r.split("\n").slice(0, 3).join(" | "));
+      ok("带证据 id", /（\d{8}-\d{6}-\w{4}）/.test(r), (r.match(/（(\d{8}-\d{6}-\w{4})）/g) ?? []).slice(0, 2).join(","));
+      ok("给出归纳指引", r.includes("profile.md"), r.split("\n").slice(-2).join(" | ").slice(0, 60));
+      ok("写入归纳戳", fs.existsSync(path.join(mem(home), "profile-style.last")), "profile-style.last");
       return;
     }
     case "extract-fail": {

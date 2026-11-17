@@ -32,6 +32,11 @@ const PAUSE_FLAG = path.join(STORE, "paused");
 
 const KINDS = ["preference", "constraint", "commitment", "relation", "correction", "decision", "outcome"] as const;
 const ACTIVE = new Set(["explicit", "event", "inference", "confirmed"]);
+/** 推断自动按事实处理的置信度门槛：>= 即直接 confirmed；低于门槛仍只作弱参考（「待确认」档） */
+const AUTO_FACT_CONF = () => Number(process.env.LIVING_MEMORY_AUTO_FACT ?? 0.85);
+/** 自动转事实的排除面：关系类与 needs-confirm 仍需人工点头（错判代价不对称） */
+const autoFactable = (kind: string, conf: number, impact?: string) =>
+  Number.isFinite(conf) && conf >= AUTO_FACT_CONF() && kind !== "relation" && impact !== "needs-confirm";
 
 type Meta = Record<string, string>;
 type Entry = { meta: Meta; body: string };
@@ -232,7 +237,7 @@ function dirStamp(): string {
 // 索引行只保留简报需要的字段；source 等长字段不进索引（否则索引和正文一样大）
 function toIndexRow(meta: Meta, title: string): EntryIndex {
   const keep: Meta = {};
-  for (const k of ["id", "kind", "status", "subject", "scope", "action_impact", "obtained_at", "expires_at", "review_after", "supersedes"]) {
+  for (const k of ["id", "kind", "status", "subject", "scope", "action_impact", "obtained_at", "expires_at", "review_after", "supersedes", "confidence"]) {
     if (meta[k]) keep[k] = meta[k];
   }
   return { id: meta.id, meta: keep, title };
@@ -318,7 +323,7 @@ function writeEntry(meta: Meta, body: string) {
   const live = entryPath(meta.id);
   const cold = path.join(EXPIRED_DIR, `${meta.id}.md`);
   const target = fs.existsSync(live) || !fs.existsSync(cold) ? live : cold;
-  const order = ["id", "kind", "status", "subject", "scope", "source", "obtained_at", "confirmed_at", "expires_at", "review_after", "confidence", "action_impact", "supersedes", "superseded_by"];
+  const order = ["id", "kind", "status", "subject", "scope", "source", "obtained_at", "confirmed_at", "expires_at", "review_after", "confidence", "evidence", "action_impact", "supersedes", "superseded_by"];
   const fm = order.map((k) => `${k}: ${meta[k] ?? ""}`).join("\n");
   writeAtomic(target, `---\n${fm}\n---\n${body.trim()}\n`);
   if (target === live) upsertIndexRow(meta, body);
@@ -419,6 +424,137 @@ function bodySimilar(a: string, b: string): boolean {
   return inter / (gx.size + gy.size - inter) > 0.5; // Jaccard：两段都要真的相似
 }
 
+// ---------- 推断转正评分（第一步：只读打分，不改状态） ----------
+// 原则：自评置信度最多贡献 0.4 分；跨会话复现 ≤0.35；用户原话重述 0.35；
+// 隐私/决策类（relation/decision/outcome）与含糊表述扣分；转正还必须独立证据 ≥2。
+type Ev = { at: string; kind: string; id?: string; note?: string };
+const HEDGE_MARK = /(可能|大概|也许|或许|待定|尚不确定|不确定|估计|应该是|似乎|推测|不一定)/;
+const PROMOTE_THRESHOLD = Number(process.env.LIVING_MEMORY_PROMOTE_THRESHOLD ?? 0.8);
+
+function evidenceOf(meta: Meta): Ev[] {
+  try {
+    const v = JSON.parse(meta.evidence || "[]");
+    return Array.isArray(v) ? (v.filter((x: any) => x && typeof x.at === "string") as Ev[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** 证据累积（第二步）：同一天同一来源重复出现则跳过；只改 evidence 字段，不新建条目 */
+function appendEvidence(e: Entry, ev: Ev): string | null {
+  const list = evidenceOf(e.meta);
+  const day = ev.at.slice(0, 10);
+  if (list.some((x) => x.at.slice(0, 10) === day && (x.id ?? "") === (ev.id ?? ""))) return null;
+  const next = list.concat(ev).slice(-20);
+  const meta = { ...e.meta, evidence: JSON.stringify(next) };
+  writeEntry(meta, e.body);
+  const s = promoteScore({ meta, body: e.body });
+  logActivity(`evidence +1 ${e.meta.id} kind=${ev.kind} total=${next.length} score=${s.score.toFixed(2)}`);
+  return `${e.meta.id} 证据 +1（${ev.kind}，累计 ${next.length} 条 / ${s.days} 天 / ${s.independent} 源，转正分 ${s.score.toFixed(2)}${s.gate ? "，已越过门槛，可用 confirm 转正" : ""}）`;
+}
+/** 复合分：返回 score 与各分项，供 promote_scan 展示与人工判断 */
+function promoteScore(e: Entry) {
+  const conf = Math.min(Math.max(Number(e.meta.confidence ?? 0.6), 0), 1);
+  const ev = evidenceOf(e.meta);
+  const days = new Set(ev.map((x) => x.at.slice(0, 10)));
+  const independent = new Set(ev.map((x) => `${x.at.slice(0, 10)}|${x.id ?? ""}`)).size;
+  const base = conf * 0.4;
+  const repeat = (Math.min(days.size, 3) / 3) * 0.5; // 口径 B：复现满分 0.50，3 次独立复现即到线
+  const restate = ev.some((x) => x.kind === "restate") ? 0.3 : 0;
+  const kind = e.meta.kind ?? "";
+  let penalty = 0;
+  if (kind === "relation" || kind === "decision" || kind === "outcome") penalty += 0.25;
+  if (HEDGE_MARK.test(e.body) || HEDGE_MARK.test(e.meta.subject ?? "")) penalty += 0.2;
+  const score = Math.min(Math.max(base + repeat + restate - penalty, 0), 1);
+  const blocked = kind === "relation" || e.meta.action_impact === "needs-confirm";
+  const gate = score >= PROMOTE_THRESHOLD && independent >= 2 && !blocked;
+  return { score, base, repeat, restate, penalty, days: days.size, independent, blocked, gate };
+}
+
+/** 只读扫描：按复合分排序打印，不写任何文件（转正在后续步骤里才开启） */
+/** 月度风格归纳（只读；写 profile 由人或 agent 做）：把窗口内的偏好/纠正/雷区摆出来当归纳材料 */
+function opStyleScan(days = 30, limit = 20): string {
+  const since = new Date(Date.now() - days * 86400e3).toISOString();
+  const rows = loadEntriesIndex().filter(
+    (r) =>
+      r.meta.status !== "expired" &&
+      r.meta.status !== "superseded" &&
+      (String(r.meta.obtained_at ?? "") >= since || String(r.meta.evidence ?? "").includes(since.slice(0, 10))),
+  );
+  if (!rows.length) return `近 ${days} 天没有新增/更新的条目——画像无需变更。`;
+  const sel = rows.filter((r) => ["preference", "constraint", "correction"].includes(r.meta.kind ?? ""));
+  const neg = sel.filter((r) => isNegation(r));
+  const others = sel.filter((r) => !isNegation(r)).slice(0, limit);
+  const counts = rows.reduce<Record<string, number>>((m, r) => {
+    const k = r.meta.kind ?? "?";
+    m[k] = (m[k] ?? 0) + 1;
+    return m;
+  }, {});
+  const lines: string[] = [
+    `近 ${days} 天：活动条目新增/更新 ${rows.length} 条（${Object.entries(counts)
+      .map(([k, v]) => `${k} ${v}`)
+      .join(" · ")}）`,
+  ];
+  if (neg.length) {
+    lines.push(`雷区 ${neg.length} 条（写成指令更好用）：`);
+    for (const r of neg.slice(0, 8)) lines.push(`- ${r.meta.subject}：${(r.title ?? "").slice(0, 46)}（${r.meta.id}）`);
+  }
+  if (others.length) {
+    lines.push(`偏好/纠正 ${others.length} 条（可能含风格线索）：`);
+    for (const r of others) lines.push(`- [${r.meta.kind}] ${r.meta.subject}：${(r.title ?? "").slice(0, 46)}（${r.meta.id}）`);
+  }
+  lines.push(
+    "归纳方式：只把反复出现的稳定线索写进 profile.md 的「三、对外口径」「四、沟通与协作习惯」，每条结论附上面的 id 当证据；一次性情绪、单个项目特例不要写进去。",
+    "`LIVING_MEMORY_PROFILE_BRIEF=1` 打开后，这两节会被压成一行注入每轮简报。",
+  );
+  try {
+    fs.writeFileSync(path.join(STORE, "profile-style.last"), new Date().toISOString());
+  } catch {
+    /* 戳写不进去不影响结果 */
+  }
+  logActivity(`style_scan days=${days} rows=${rows.length} neg=${neg.length}`);
+  return lines.join("\n");
+}
+
+/** 画像是否到了该归纳的时候（戳缺失也视为到期） */
+function styleScanOverdue(days = 30): boolean {
+  try {
+    const at = fs.readFileSync(path.join(STORE, "profile-style.last"), "utf8").trim();
+    return Date.now() - Date.parse(at) > days * 86400e3;
+  } catch {
+    return true;
+  }
+}
+
+function opPromoteScan(limit = 20): string {
+  const rows = loadEntriesIndex()
+    .filter((r) => r.meta.status === "inference") // 只有推断是转正候选，confirmed/explicit 无需评分
+    .map((r) => ({ r, e: parseEntry(entryPath(r.id)) }))
+    .filter((x): x is { r: (typeof rows)[number]["r"]; e: Entry } => !!x.e)
+    .map(({ r, e }) => ({
+      id: r.id,
+      subject: r.meta.subject ?? "",
+      kind: r.meta.kind ?? "",
+      status: r.meta.status ?? "",
+      s: promoteScore(e),
+    }));
+  if (!rows.length) return "没有活动条目可评分。";
+  const sorted = rows.sort((a, b) => b.s.score - a.s.score);
+  const over = sorted.filter((x) => x.s.gate).length;
+  const n = Math.max(1, Math.min(limit, 50));
+  const lines = sorted.slice(0, n).map(
+    (x, i) =>
+      `${String(i + 1).padStart(2)}. ${x.s.score.toFixed(2)}${x.s.gate ? " 可转正" : ""} · ${x.kind} · ${x.status} · ${x.id}\n` +
+      `    ${x.subject}｜自评 ${x.s.base.toFixed(2)} · 复现 ${x.s.repeat.toFixed(2)}(${x.s.days} 天/${x.s.independent} 源) · 重述 ${x.s.restate.toFixed(2)} · 扣分 ${x.s.penalty.toFixed(2)}${x.s.blocked ? " · 需人工" : ""}`,
+  );
+  const avg = sorted.reduce((a, b) => a + b.s.score, 0) / sorted.length;
+  return (
+    `推断转正评分（阈值 ${PROMOTE_THRESHOLD}，独立证据 ≥2，本命令只读不改状态）\n` +
+    `活动 ${sorted.length} 条 · 平均 ${avg.toFixed(2)} · 最高 ${sorted[0].s.score.toFixed(2)} · 越过门槛 ${over} 条\n\n` +
+    lines.join("\n") +
+    (sorted.length > n ? `\n…（另有 ${sorted.length - n} 条未显示，limit 可调）` : "")
+  );
+}
 /** 冲突检测：先按 kind+subject 从索引筛候选（不读正文），只读命中候选的正文比对 */
 function findConflicting(kind: string, subject: string, text: string): Entry | null {
   const want = normText(subject);
@@ -871,6 +1007,45 @@ function validateScope(raw: string): string {
   }`;
 }
 
+/** A：按已存 confidence 追溯转事实（幂等）。用于规则上线前的存量推断；会话启动自动跑 */
+function autoFactRetro(limit = 10): string[] {
+  if (isPaused()) return [];
+  const acted: string[] = [];
+  const cands = loadEntriesIndex().filter((r) => r.meta.status === "inference");
+  for (const r of cands) {
+    if (acted.length >= limit) break;
+    const conf = Number(r.meta.confidence ?? NaN);
+    if (!autoFactable(r.meta.kind ?? "", conf, r.meta.action_impact)) continue;
+    const e = parseEntry(entryPath(r.id));
+    if (!e) continue;
+    opConfirm(e, `auto-fact retro conf=${conf}`);
+    acted.push(`${r.id}（conf ${conf}）`);
+  }
+  if (acted.length) logActivity(`auto-fact retro: ${acted.length} 条 → ${acted.join("; ")}`);
+  return acted;
+}
+
+/** B：证据驱动的自动转事实。独立日期 >=3 天、复合分 >= 门槛、且非关系/需确认即视为事实 */
+function autoFactEvidence(limit = 5): string[] {
+  if (process.env.LIVING_MEMORY_AUTO_FACT_EVIDENCE === "0" || isPaused()) return [];
+  const minDays = Number(process.env.LIVING_MEMORY_AUTO_FACT_DAYS ?? 3);
+  const minScore = Number(process.env.LIVING_MEMORY_AUTO_FACT_SCORE ?? PROMOTE_THRESHOLD);
+  const acted: string[] = [];
+  const cands = loadEntriesIndex().filter((r) => r.meta.status === "inference");
+  for (const r of cands) {
+    if (acted.length >= limit) break;
+    if (r.meta.kind === "relation" || r.meta.action_impact === "needs-confirm") continue;
+    const e = parseEntry(entryPath(r.id));
+    if (!e) continue;
+    const s = promoteScore(e);
+    if (s.days < minDays || s.score < minScore || s.independent < 2) continue;
+    opConfirm(e, `auto-fact evidence days=${s.days} score=${s.score.toFixed(2)}`);
+    acted.push(`${r.id}（${s.days} 天 / 分 ${s.score.toFixed(2)}）`);
+  }
+  if (acted.length) logActivity(`auto-fact evidence: ${acted.length} 条 → ${acted.join("; ")}`);
+  return acted;
+}
+
 // ---------- Phase 5：简报分层预算 + 文档检索辅助 ----------
 // 简报改为分档配额：到期 > 待确认推断 > 当前项目 scope > 全局，各档独立上限；
 // 每行 subject 42 字符 + 正文摘录，总长硬顶（默认 2400，LIVING_MEMORY_BRIEF_MAX_CHARS 可调）；
@@ -879,6 +1054,38 @@ const BRIEF_MAX_CHARS = Number(process.env.LIVING_MEMORY_BRIEF_MAX_CHARS ?? 2400
 const BRIEF_LINE_CHARS = 130;
 const TODO_DIGEST_CHARS = Number(process.env.LIVING_MEMORY_TODO_DIGEST_CHARS ?? 70);
 const TODO_DIGEST_RESERVE = 150;
+
+/** 画像摘要：只取「三、对外口径」「四、沟通与协作习惯」两节正文（人写结论），去标记与占位，压成一行 */
+function profileDigest(max = 200): string {
+  let text = "";
+  try {
+    text = fs.readFileSync(path.join(STORE, "profile.md"), "utf8");
+  } catch {
+    return "";
+  }
+  const body = text.replace(/<!--[\s\S]*?-->/g, "");
+  const parts = body.split(/\n(?=## )/).filter((x) => /^## (三|四)/.test(x));
+  // 只留“可念出来”的句子：跳过引用/小标题/注释，剥掉 markdown 装饰与证据 id（括号内含 2026…id 的那段）
+  const clean = (l: string) =>
+    l
+      .replace(/^\s*[-*>#]+\s*/, "")
+      .replace(/\*\*/g, "")
+      .replace(/`/g, "")
+      .replace(/（[^）]*20\d{6}[^）]*）/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  const lines = parts
+    .flatMap((p) => p.split("\n").slice(1))
+    .map(clean)
+    .filter((l) => l && !/暂无/.test(l) && !/^本节|^边界|^维护|^定位/.test(l) && l.length > 4);
+  const joined = lines.join("；");
+  return joined.length > max ? `${joined.slice(0, max)}…` : joined;
+}
+
+const PROFILE_BRIEF_ON = () => process.env.LIVING_MEMORY_PROFILE_BRIEF === "1";
+/** 负面偏好标记：这类条目在简报里优先，并打 [雷区] 标签 */
+const NEGATION_RE = /(不要|别把|别再|禁止|不得|避免|切勿|勿|never|don'?t|avoid)/i;
+const isNegation = (e: { meta: any; title?: string }) => NEGATION_RE.test(`${e.meta?.subject ?? ""} ${e.title ?? ""}`);
 const TODO_FILE = path.join(STORE, "todo.md");
 const TODO_ARCHIVE_FILE = path.join(STORE, "todo-archive.md");
 const SUMMARY_FILE = path.join(STORE, "summary.md");
@@ -1886,11 +2093,14 @@ function buildBrief(cwd?: string): string {
   const d = visible.filter((e: Entry) => isDue(e.meta)).sort(urgent);
   const p = visible.filter((e: Entry) => e.meta.status === "inference" && !d.includes(e)).sort(urgent);
   const proj = visible.filter((e: Entry) => !d.includes(e) && !p.includes(e) && scoped(e)).sort(urgent);
-  const glob = visible.filter((e: Entry) => !d.includes(e) && !p.includes(e) && !scoped(e)).sort(urgent);
+  // 负面偏好（不要/禁止/避免…）在全局档里优先，避免「别做 X」被普通偏好挤掉
+  const glob = visible
+    .filter((e: Entry) => !d.includes(e) && !p.includes(e) && !scoped(e))
+    .sort((a: Entry, b: Entry) => (isNegation(b) ? 1 : 0) - (isNegation(a) ? 1 : 0) || urgent(a, b));
   const tiers: Array<{ tag: string; cap: number; items: EntryIndex[] }> = [
     { tag: "[到期] ", cap: 5, items: d },
     { tag: "", cap: 8, items: proj },
-    { tag: "[待确认] ", cap: 4, items: p },
+    { tag: "[推断·弱] ", cap: 4, items: p },  // 低于自动门槛的推断：只作弱参考，不按事实处理
     { tag: "", cap: 5, items: glob },
   ];
   const lines: string[] = [];
@@ -1903,7 +2113,7 @@ function buildBrief(cwd?: string): string {
         dropped++;
         continue;
       }
-      const text = briefLine(t.tag, e);
+      const text = briefLine(t.tag || (isNegation(e) ? "[雷区] " : ""), e);
       if (used + text.length + 1 > BRIEF_MAX_CHARS) {
         dropped++;
         continue;
@@ -1948,6 +2158,18 @@ function buildBrief(cwd?: string): string {
     if (used + line.length + 1 <= BRIEF_MAX_CHARS) {
       lines.push(line);
       used += line.length + 1;
+    }
+  }
+
+  // 画像摘要（默认关：LIVING_MEMORY_PROFILE_BRIEF=1 开）
+  if (PROFILE_BRIEF_ON()) {
+    const digest = profileDigest();
+    if (digest) {
+      const line = `· 画像：${digest}`;
+      if (used + line.length + 1 <= BRIEF_MAX_CHARS + 220) {
+        lines.push(line);
+        used += line.length + 1;
+      }
     }
   }
 
@@ -2103,17 +2325,23 @@ async function runExtraction(text: string, ctx: any, reason: string): Promise<vo
         continue;
       }
       const dup = findConflicting(kind, subject, body);
-      if (dup) continue;
+      if (dup) {
+        // 同一推断再次被抽取到：算一次复现证据（不新建条目，不改 confidence）
+        if (dup.meta.status === "inference")
+          appendEvidence(dup, { at: new Date().toISOString(), kind: "repeat", id: `extract-${reason}`, note: "抽取器再次命中同一事实" });
+        continue;
+      }
+      const autoFact = autoFactable(kind, conf, "advice-only");
       const id = newId();
       const meta: Meta = {
         id,
         kind,
-        status: "inference",
+        status: autoFact ? "confirmed" : "inference",
         subject,
         scope: "global",
-        source: `auto-extract ${today()}（${reason} 模型抽取，待用户确认）`,
+        source: `auto-extract ${today()}（${reason} 模型抽取，${autoFact ? "高置信度自动按事实" : "待用户确认"}）`,
         obtained_at: new Date().toISOString(),
-        confirmed_at: "",
+        confirmed_at: autoFact ? new Date().toISOString() : "",
         expires_at: "",
         review_after: new Date(Date.now() + 14 * 86400e3).toISOString().slice(0, 10),
         confidence: String(Math.min(Math.max(conf, 0), 1)),
@@ -2122,14 +2350,19 @@ async function runExtraction(text: string, ctx: any, reason: string): Promise<vo
         superseded_by: "",
       };
       writeEntry(meta, body);
-      logActivity(`auto-extract created ${id} kind=${kind} subject=${subject} (${reason})`);
+      logActivity(
+        `auto-extract created ${id} kind=${kind} status=${meta.status}${autoFact ? ` auto-fact conf=${meta.confidence}` : ""} subject=${subject} (${reason})`,
+      );
       n++;
     }
     dbg(`candidates written: ${n}`);
     if (n > 0) {
       if (ctx?.hasUI) {
         try {
-          ctx.ui.notify(`living memory：自动抽取 ${n} 条候选（待确认）—— /memory review 或直接对模型说确认。`, "info");
+          ctx.ui.notify(
+            `living memory：自动抽取 ${n} 条（confidence ≥ ${AUTO_FACT_CONF()} 已按事实处理，其余待确认）—— /memory review 可逐条看。`,
+            "info",
+          );
         } catch {
           /* 尽力而为 */
         }
@@ -2170,7 +2403,7 @@ export default function (pi: ExtensionAPI) {
     promptGuidelines: [
       "Use remember when the user states a durable personal preference, ongoing commitment/deadline, relation fact, correction, or decision/outcome that matters across sessions — always with kind, subject, basis, source (日期+谁说的+原话引用).",
       "Never call remember for credentials/secrets, unverified sensitive inferences (health/politics/finance/sexuality), transient states（不写入本层）, full transcripts where one fact suffices, or others' private details beyond task need.",
-      "remember with basis=inference must set confidence, and the entry stays pending until the user confirms via living_memory_update confirm — inferences never auto-escalate.",
+      "remember with basis=inference must set confidence. Inference with confidence >= 0.85 (LIVING_MEMORY_AUTO_FACT) is written as a fact directly (status=confirmed); below that it stays a weak reference in the pending tier until the user confirms. kind=relation and action_impact=needs-confirm always stay pending — set those when the fact is sensitive.",
       "本层是唯一记忆层：同一 subject+kind 已有活动条目时用 living_memory_update supersede 替换，不要并存矛盾事实；工程实况写 summary.md（按项目小节），待办写 todo.md，两者用 living_memory source=summary/todo 检索，不要塞进 entries。",
     ],
     parameters: Type.Object({
@@ -2191,7 +2424,25 @@ export default function (pi: ExtensionAPI) {
       if (p.basis === "inference" && (p.confidence == null || p.confidence < 0 || p.confidence > 1))
         return { content: [{ type: "text", text: "basis=inference 必须带 confidence（0-1）。" }] };
       const dup = findConflicting(p.kind, p.subject, p.text);
-      if (dup)
+      if (dup) {
+        // 推断条目被再次提及：记证据而不是新建（第二步）；显式陈述算最强证据 restate
+        if (dup.meta.status === "inference" && (p.basis === "inference" || p.basis === "explicit")) {
+          const note = appendEvidence(dup, {
+            at: new Date().toISOString(),
+            kind: p.basis === "explicit" ? "restate" : "repeat",
+            id: (p.source ?? "").slice(0, 40) || "remember",
+            note: p.basis === "explicit" ? "用户原话重述" : "同一事实再次出现",
+          });
+          if (note)
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `${note}\n（同一事实不新建条目；越过门槛后请用 living_memory_update confirm 转正。）`,
+                },
+              ],
+            };
+        }
         return {
           content: [
             {
@@ -2200,6 +2451,7 @@ export default function (pi: ExtensionAPI) {
             },
           ],
         };
+      }
       // 软提示：同 subject+kind 已有活动条目（正文不相似也算）——只查索引，不读正文
       const wantSubj = normSubject(p.subject);
       const siblings = loadEntriesIndex().filter(
@@ -2213,16 +2465,17 @@ export default function (pi: ExtensionAPI) {
         : "";
       const scopeErr = validateScope(p.scope || "global");
       if (scopeErr) return { content: [{ type: "text", text: scopeErr }] };
+      const autoFact = p.basis === "inference" && autoFactable(p.kind, Number(p.confidence), p.action_impact);
       const id = newId();
       const meta: Meta = {
         id,
         kind: p.kind,
-        status: p.basis,
+        status: autoFact ? "confirmed" : p.basis,
         subject: p.subject,
         scope: (p.scope || "global").trim(),
         source: p.source,
         obtained_at: new Date().toISOString(),
-        confirmed_at: p.basis === "explicit" ? new Date().toISOString() : "",
+        confirmed_at: autoFact || p.basis === "explicit" ? new Date().toISOString() : "",
         expires_at: p.expires_at || "",
         review_after: p.review_after || defaultReviewAfter(p.basis, p.kind),
         confidence: p.basis === "inference" ? String(p.confidence) : "",
@@ -2231,10 +2484,18 @@ export default function (pi: ExtensionAPI) {
         superseded_by: "",
       };
       writeEntry(meta, p.text);
-      logActivity(`created ${id} kind=${p.kind} status=${p.basis} subject=${p.subject}`);
+      logActivity(
+        autoFact
+          ? `created ${id} kind=${p.kind} status=confirmed auto-fact conf=${p.confidence} subject=${p.subject}`
+          : `created ${id} kind=${p.kind} status=${p.basis} subject=${p.subject}`,
+      );
       refreshWidget(ctx);
-      const tail = p.basis === "inference" ? "\n（推断待确认：需用户经 living_memory_update confirm 后才算确认事实，此前只能作为弱参考。）" : "";
-      return { content: [{ type: "text", text: `已记入长期记忆 ${id}（status=${p.basis}，scope=${meta.scope}）${tail}${sibHint}\n存储: ${entryPath(id)}` }] };
+      const tail = autoFact
+        ? `\n（confidence ${p.confidence} ≥ ${AUTO_FACT_CONF()}：已按事实处理（status=confirmed）。若判断有误，用 supersede 替换或 expire 失效。）`
+        : p.basis === "inference"
+          ? `\n（置信度 ${p.confidence} < ${AUTO_FACT_CONF()} 或属 relation/needs-confirm：保留为推断，只在「待确认」档作弱参考，需 confirm 才按事实处理。）`
+          : "";
+      return { content: [{ type: "text", text: `已记入长期记忆 ${id}（status=${meta.status}，scope=${meta.scope}）${tail}${sibHint}\n存储: ${entryPath(id)}` }] };
     },
   });
 
@@ -2339,7 +2600,7 @@ export default function (pi: ExtensionAPI) {
     ],
     parameters: Type.Object({
       id: Type.Optional(Type.String({ description: "条目 id 或唯一前缀（restore 可传已删除条目的 id）；todo_* 不需要" })),
-      action: StringEnum(["confirm", "supersede", "renew", "expire", "delete", "restore", "todo_done", "todo_undo", "todo_add", "todo_edit", "todo_delete", "todo_archive", "summary_add", "summary_update", "purge_expired", "rotate_recovery", "summary_archive", "profile_rebuild"]),
+      action: StringEnum(["confirm", "supersede", "renew", "expire", "delete", "restore", "todo_done", "todo_undo", "todo_add", "todo_edit", "todo_delete", "todo_archive", "summary_add", "summary_update", "purge_expired", "rotate_recovery", "summary_archive", "profile_rebuild", "promote_scan", "style_scan", "auto_fact"]),
       match: Type.Optional(Type.String({ description: "todo_done/todo_undo/todo_edit/todo_delete 必填：待办正文的唯一关键词（大小写不敏感子串）；summary_update 必填：小节标题的唯一关键词" })),
       section: Type.Optional(Type.String({ description: "todo_add 可选：`## ` 小节名关键词；缺省追加到最后一个待办之后" })),
       project: Type.Optional(Type.String({ description: "todo_add 可选：项目标记（写成行尾 @project，可用 source=todo query=@project 筛）" })),
@@ -2349,6 +2610,8 @@ export default function (pi: ExtensionAPI) {
       review_after: Type.Optional(Type.String({ description: "renew 可选：新复核日期，默认 +30 天" })),
       expires_at: Type.Optional(Type.String({ description: "renew 可选：新到期日期" })),
       note: Type.Optional(Type.String({ description: "审计备注（如用户原话）" })),
+      title: Type.Optional(Type.String({ description: "summary_add 必填：小节标题（正文写在 body 里）" })),
+      body: Type.Optional(Type.String({ description: "summary_add/summary_update 必填：小节正文，按 `- ` 条目写入，不要带标题行" })),
       older_than_days: Type.Optional(Type.Number({ description: "purge_expired 可选：只清理距今 ≥ 该天数的 expired/superseded 条目，默认 30" })),
       dry_run: Type.Optional(Type.Boolean({ description: "purge_expired 可选：默认 true 只列候选；传 false 才真正移动文件" })),
       scope: Type.Optional(Type.String({ description: "批量 expire 可选：按 scope 精确选择（如 project:vanlife）" })),
@@ -2393,6 +2656,8 @@ export default function (pi: ExtensionAPI) {
       }
       if (isPaused() && !["delete", "restore"].includes(p.action))
         return { content: [{ type: "text", text: "living memory 已被 /memory off 暂停——治理写操作不可用（delete 除外）。" }] };
+      if (p.action === "style_scan")
+        return { content: [{ type: "text", text: opStyleScan(Number(p.match ?? 30) || 30) }] };
       if (p.action === "restore") {
         refreshWidget(ctx);
         return { content: [{ type: "text", text: opRestore(p.id) }] };
@@ -2446,8 +2711,21 @@ export default function (pi: ExtensionAPI) {
           ],
         };
       }
+      if (p.action === "auto_fact") {
+        const a = autoFactRetro();
+        const b = autoFactEvidence();
+        if (!a.length && !b.length) return "没有可自动转事实的推断（门槛：confidence ≥ 门槛或证据 ≥3 天且复合分 ≥ 门槛；关系类与 needs-confirm 永不自动）。";
+        return [
+          a.length ? `按置信度转正 ${a.length} 条：${a.join("；")}` : "",
+          b.length ? `按证据转正 ${b.length} 条：${b.join("；")}` : "",
+        ]
+          .filter(Boolean)
+          .join("\n");
+      }
       if (p.action === "profile_rebuild")
         return { content: [{ type: "text", text: refreshProfile(p.dry_run !== false) }] };
+      if (p.action === "promote_scan")
+        return { content: [{ type: "text", text: opPromoteScan(Number(p.match) || 20) }] };
       if (!p.id) return { content: [{ type: "text", text: `${p.action} 必须带 id（条目 id 或唯一前缀）。` }] };
       const e = findEntry(p.id);
       if (!e) return { content: [{ type: "text", text: `找不到条目 ${p.id}` }] };
@@ -2811,6 +3089,10 @@ function refreshProfile(dry = true): string {
     try {
       const cleaned = autoTriage("session_start");
       if (cleaned.length) ctx.ui.notify(`living memory 自动清理（A 档）${cleaned.length} 条：${cleaned.join("；")}`, "info");
+      // 推断自动按事实：先按已存 confidence 追溯补判（A），再按证据累积判（B）
+      const autoFacts = [...autoFactRetro(), ...autoFactEvidence()];
+      if (autoFacts.length)
+        ctx.ui.notify(`living memory 自动按事实处理 ${autoFacts.length} 条：${autoFacts.join("；")}`, "info");
       // recovery/ 保留期轮转：只在有到期文件时才动，静默执行并记审计
       const rotated = rotateRecovery(RECOVERY_RETAIN_DAYS, false);
       if (rotated.startsWith("已物理删除")) ctx.ui.notify(`living memory ${rotated}`, "info");
@@ -2830,6 +3112,8 @@ function refreshProfile(dry = true): string {
             `待办 ${dueTodo.length} 项 7 日内到期${overdue ? `（其中 ${overdue} 项已逾期）` : ""}：source=todo query="due:soon" 查看`,
           );
         }
+        const styleDue = styleScanOverdue(30) && loadEntriesIndex().filter((r) => ACTIVE.has(r.meta.status ?? "explicit")).length >= 5;
+        if (styleDue) hints.push("画像 30 天未归纳：action=style_scan 出候选，再按证据改写 profile.md 的三、四节");
         const fail24 = recentExtractFailures(24);
         if (fail24.length) {
           const why = [...new Set(fail24.map((f) => f.reason))].join("/");
