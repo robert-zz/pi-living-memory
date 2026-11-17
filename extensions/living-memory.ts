@@ -1084,7 +1084,15 @@ function profileDigest(max = 200): string {
   return joined.length > max ? `${joined.slice(0, max)}…` : joined;
 }
 
-const PROFILE_BRIEF_ON = () => process.env.LIVING_MEMORY_PROFILE_BRIEF === "1";
+const PROFILE_BRIEF_ON = () => {
+  if (process.env.LIVING_MEMORY_PROFILE_BRIEF === "1") return true;
+  if (process.env.LIVING_MEMORY_PROFILE_BRIEF === "0") return false;
+  try {
+    return fs.existsSync(path.join(STORE, "profile-brief.on"));
+  } catch {
+    return false;
+  }
+};
 /** 负面偏好标记：这类条目在简报里优先，并打 [雷区] 标签 */
 const NEGATION_RE = /(不要|别把|别再|禁止|不得|避免|切勿|勿|never|don'?t|avoid)/i;
 const isNegation = (e: { meta: any; title?: string }) => NEGATION_RE.test(`${e.meta?.subject ?? ""} ${e.title ?? ""}`);
@@ -2847,7 +2855,7 @@ function refreshProfile(dry = true): string {
   pi.registerCommand("memory", {
     description: "长期记忆治理面板（无参=浏览；todo=逐条勾选待办；review=逐条处理到期复核；pending=逐条处理待确认推断；off/on=暂停/恢复写入）",
     getArgumentCompletions: (prefix: string) => {
-      const items = ["review", "pending", "todo", "profile", "on", "off"].map((v) => ({ value: v, label: v }));
+      const items = ["review", "pending", "todo", "profile", "style", "on", "off"].map((v) => ({ value: v, label: v }));
       return items.filter((i) => i.value.startsWith(prefix));
     },
     handler: async (args: string, ctx: any) => {
@@ -3040,6 +3048,14 @@ function refreshProfile(dry = true): string {
           ctx.ui.notify(lockedTodoToggleAt(row.idx, !showDone), "info");
           refreshWidget(ctx);
         }
+      }
+      if (arg === "style") {
+        const days = 30;
+        const out = opStyleScan(days);
+        ctx.ui.notify(out.split("\n").slice(0, 6).join("\n"), "info");
+        ctx.ui.setStatus?.("living-memory", "style_scan 完成（候选见通知，详情用 living_memory action=style_scan）");
+        refreshWidget(ctx);
+        return;
       }
       if (arg === "profile") {
         const ok = ctx.hasUI ? await ctx.ui.confirm("刷新画像统计块？", "只更新 profile.md 里 STATS 标记区间的机械计数，四节正文不动。") : true;

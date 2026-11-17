@@ -19,7 +19,7 @@ per-turn prompt cost stays flat as the library grows.
 - **Tools**: `remember` (write) · `living_memory` (query: `entries` / `todo` / `summary` / `archive` / `extract`) ·
   `living_memory_update` (governance: `confirm` / `supersede` / `expire` / `restore`, `todo_*`, `summary_*`,
   `purge_expired`, `promote_scan`, `style_scan`, `auto_fact`, `profile_rebuild`).
-- **Command**: `/memory` — overview, or `pending` / `todo` / `review` / `profile` / `on|off`.
+- **Command**: `/memory` — overview, or `pending` / `todo` / `review` / `profile` / `style` / `on|off`.
 - **Main env vars**: `LIVING_MEMORY_AUTO_FACT` (0.85 — inference becomes fact at or above) ·
   `LIVING_MEMORY_BRIEF_MAX_CHARS` (2400) · `LIVING_MEMORY_EXTRACT` · `LIVING_MEMORY_AUTO_TRIAGE` ·
   `LIVING_MEMORY_PROFILE_BRIEF` · `LIVING_MEMORY_AUTO_FACT_EVIDENCE`.
@@ -99,7 +99,7 @@ pi install /work/projects/pi-extensions/pi-living-memory
 
 ### 斜杠命令
 
-`/memory` 开面板（review / pending / todo / profile / on / off），`/memory pending` 逐条确认推断。
+`/memory` 开面板（review / pending / todo / profile / style / on / off），`/memory pending` 逐条确认推断，`/memory style` 跑一次 30 天风格归纳。
 
 ## 简报与开屏
 

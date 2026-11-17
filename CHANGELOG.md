@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.9] - 2026-11-17
+
+画像可一键注入与风格归纳入口。
+
+- `LIVING_MEMORY_PROFILE_BRIEF` 支持文件开关：`touch ~/.pi/agent/memory/profile-brief.on`（不必再设环境变量；`=0` 仍可强制关）
+- `/memory style`：跑一次 30 天窗口的 `style_scan`，通知出雷区/偏好候选，详情仍用 `living_memory action=style_scan`
+- 真库 `profile.md` 的「三、对外口径」「四、沟通与协作习惯」按 30 天证据重写为 176 字（此前把项目特例混进了对外口径）
+
 ## [0.1.7] - 2026-11-17
 
 派生索引加格式版本闸门（A 档追溯本应生效却没跑）。
