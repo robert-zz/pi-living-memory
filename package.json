@@ -1,8 +1,11 @@
 {
   "name": "pi-living-memory",
   "version": "0.1.7",
-  "private": true,
   "description": "Pi extension: durable long-term memory with lifecycle metadata — entries with kind/status/scope/expiry, TODO + SUMMARY docs, derived indexes, and a read-only archive fallback",
+  "author": {
+    "name": "robert",
+    "email": "zhaozhuo69@gmail.com"
+  },
   "keywords": [
     "pi-package",
     "memory",
@@ -19,13 +22,16 @@
   "files": [
     "extensions",
     "tests",
+    "!tests/under-test",
     "docs",
     "README.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "LICENSE"
   ],
   "scripts": {
     "test": "bun tests/run.ts",
-    "test:list": "bun tests/run.ts --list"
+    "test:list": "bun tests/run.ts --list",
+    "prepublishOnly": "bun tests/run.ts"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

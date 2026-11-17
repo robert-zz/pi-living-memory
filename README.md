@@ -4,17 +4,47 @@ Pi 扩展：**带生命周期的长期记忆**。事实不再是散文段落，�
 
 **文档**：[使用说明](docs/guide.md)（记什么/怎么查/怎么清） · [架构与数据流](docs/architecture.md)（架构图·时序图·状态机） · [演进路线](docs/roadmap.md)
 
+## English quick start
+
+Durable, auditable long-term memory for a Pi session: facts are records with lifecycle
+metadata (`kind` / `status` / `scope` / expiry / review), engineering state and todos
+live in two plain-markdown documents, and every store has derived indexes so the
+per-turn prompt cost stays flat as the library grows.
+
+- **Install**: `pi install npm:pi-living-memory` (or `git:` / a local path).
+  Remove any copy under `~/.pi/agent/extensions/` first — two instances register duplicate tools and commands (`/memory:1`, `/memory:2`).
+- **Data** lives in `~/.pi/agent/memory/`: `entries/`, `todo.md`, `summary.md`, `profile.md`,
+  `index.json` · `summary-index.json` · `todo-index.json` (derived, rebuildable), `activity.log`,
+  `recovery/`, `expired/`, plus `archive/` when a qmd snapshot exists.
+- **Tools**: `remember` (write) · `living_memory` (query: `entries` / `todo` / `summary` / `archive` / `extract`) ·
+  `living_memory_update` (governance: `confirm` / `supersede` / `expire` / `restore`, `todo_*`, `summary_*`,
+  `purge_expired`, `promote_scan`, `style_scan`, `auto_fact`, `profile_rebuild`).
+- **Command**: `/memory` — overview, or `pending` / `todo` / `review` / `profile` / `on|off`.
+- **Main env vars**: `LIVING_MEMORY_AUTO_FACT` (0.85 — inference becomes fact at or above) ·
+  `LIVING_MEMORY_BRIEF_MAX_CHARS` (2400) · `LIVING_MEMORY_EXTRACT` · `LIVING_MEMORY_AUTO_TRIAGE` ·
+  `LIVING_MEMORY_PROFILE_BRIEF` · `LIVING_MEMORY_AUTO_FACT_EVIDENCE`.
+- **Tests**: `bun tests/run.ts` — 28 cases / 137 assertions against a temporary HOME, never your real store.
+- **Dependencies**: `typebox` and `@earendil-works/*` are host-provided. They are declared as
+  `peerDependencies` and never bundled (a physical copy would bypass Pi's module mapping).
+
+Behavior, design trade-offs and the pitfalls we hit are documented in Chinese below.
+
 ## 安装
 
 ```bash
-# 本地目录（开发用，不复制）
-pi install /work/projects/pi-extensions/pi-living-memory
+# npm（发布后的正式装法）
+pi install npm:pi-living-memory
 
 # git（钉 tag，可回滚）
 pi install git:github.com/<you>/pi-living-memory@v0.1.0
+
+# 本地目录（开发用，不复制）
+pi install /work/projects/pi-extensions/pi-living-memory
 ```
 
-`pi list` 查看 / `pi remove <source>` 卸载。装成包之后**必须删掉** `~/.pi/agent/extensions/living-memory.ts`，否则两份实例同时注册 `living_memory` / `remember`，工具会重名。
+**只能有一份实例**：装成包之后要删掉 `~/.pi/agent/extensions/living-memory.ts`，否则两份同时注册 `living_memory` / `remember`，`/memory` 会变成 `memory:1` / `memory:2`，两套内存缓存还会互相看不见对方的写入。
+
+`pi list` 查看 / `pi remove <source>` 卸载。本地目录装的包**不会被 npm install**，依赖仍由宿主提供。
 
 依赖由 pi 宿主提供（`@earendil-works/pi-ai`、`@earendil-works/pi-coding-agent`、`typebox`），因此这三个是 `peerDependencies`，包内不带副本。
 
@@ -156,19 +186,19 @@ bun tests/run.ts --list
 
 ## 开发轨
 
-改代码时可以两处并存，但**同一时间只能有一处被加载**：
+**单一来源**：`extensions/living-memory.ts`（本仓）。`~/.pi/agent/extensions/` 下不再保留副本——两份实例会各自缓存索引与文件状态，互相看不见对方的写入（曾经把大写 `summary.md` 写回来一次）。
 
-- 开发副本 `~/.pi/agent/extensions/living-memory.ts`（`/reload` 立即生效，适合快速迭代）；
-- 包 `/work/projects/pi-extensions/pi-living-memory/extensions/living-memory.ts`（版本化、可回滚，适合稳定态）。
-
-同步方向固定为「开发副本 → 包」，别反向改包：
+日常循环：
 
 ```bash
-cp ~/.pi/agent/extensions/living-memory.ts \
-   /work/projects/pi-extensions/pi-living-memory/extensions/living-memory.ts
-cd /work/projects/pi-extensions/pi-living-memory && bun tests/run.ts
+cd /work/projects/pi-extensions/pi-living-memory
+# 改 extensions/living-memory.ts
+bun tests/run.ts          # 28 用例 / 137 断言，跑在临时 HOME，不碰真库
+/reload                   # 包路径就是本目录，pi 重新读盘即生效
 git commit -am "..." && git tag v0.1.x
 ```
+
+`/reload` 只重载模块；**删/加扩展文件、改 `settings.json` 的 packages 后必须重启 pi**，否则旧实例的注册不会消失（表现为 `/memory:1`、`/memory:2`）。
 
 ## 升级与回滚
 
@@ -178,6 +208,23 @@ pi install git:github.com/<you>/pi-living-memory@v0.0.9   # 退回旧 tag
 ```
 
 包升级只换代码，`~/.pi/agent/memory` 原样保留；`/reload` 即可生效。
+
+## 发布到 npm
+
+```bash
+npm login                      # 首次发布会要求 2FA OTP
+npm pack --dry-run             # 看清单与体积（现在是 ~458KB，27 个文件）
+npm publish                    # prepublishOnly 会先跑 bun tests/run.ts，不过不发
+```
+
+发布前确认四件事：
+
+1. `package.json` **不能有** `"private": true`；
+2. `typebox` / `@earendil-works/*` 只能在 `peerDependencies`（`"*"`）里，**不能进 `dependencies`**——物理副本会绕过 pi 的模块映射（`docs/packages.md:114`）；
+3. 版本号必须 bump（同版本重发会被 registry 拒绝，已发布版本删不掉，只能 `npm deprecate`）；
+4. 包名可用：`curl -s -o /dev/null -w '%{http_code}' https://registry.npmjs.org/pi-living-memory`，`404` 才是空闲。
+
+`keywords` 里有 `pi-package` 就会出现在 [pi.dev/packages](https://pi.dev/packages) 的 gallery。发布后 `pi install npm:pi-living-memory@<版本>` 验证，再把 `settings.json` 里的本地路径条目换成 npm spec——两者并存会造成“源码改了、装的是旧行为”的错觉。
 
 ## 设计约束（改代码前请先读）
 
