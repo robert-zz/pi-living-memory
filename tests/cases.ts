@@ -49,6 +49,8 @@ export const CASES: Meta[] = [
   { id: "recall-hitcount", title: "召回：被过滤词元不计入最少命中数", seed: "basic" },
   { id: "recall-ascii-short", title: "召回：2 字母技术缩写白名单（ai/ci/pr/ui/db/ss）", seed: "basic" },
   { id: "miss-log", title: "零命中：写 miss.log / 命中不写 / 开关关闭", seed: "basic" },
+  { id: "clock-freeze", title: "时钟：冻结时钟决定到期分档（策略走注入 Clock）", seed: "basic" },
+  { id: "config-inject", title: "配置：setConfig 改简报上限，还原后一致", seed: "bulk" },
 ];
 
 const checks: Array<{ name: string; ok: boolean; detail?: string }> = [];
@@ -844,6 +846,55 @@ async function body(id: string, home: string) {
       ok("两进程写入都保留", added === 16, `${added}/16 条`);
       ok("无重复条目", new Set(todo.match(/并发条目 (A|B)-\d/g) ?? []).size === 16);
       ok("未丢原始待办", todo.includes("待办甲") && todo.includes("待办丁"));
+      return;
+    }
+    case "clock-freeze": {
+      const L = await load(home, AUTO_OFF);
+      const { setClock } = await import("./under-test/living-memory.ts");
+      // 三条只差 review_after 的条目：早于 / 等于 / 晚于冻结日
+      writeEntry(home, { id: "20260110-000001-ck01", subject: "复核早于冻结日", review_after: "2026-01-10", body: "早于冻结日的复核正文。" });
+      writeEntry(home, { id: "20260110-000002-ck02", subject: "复核等于冻结日", review_after: "2026-01-15", body: "等于冻结日的复核正文。" });
+      writeEntry(home, { id: "20260110-000003-ck03", subject: "复核晚于冻结日", review_after: "2026-01-20", body: "晚于冻结日的复核正文。" });
+      const freeze = (day: string) => setClock({ now: () => Date.parse(`${day}T00:00:00Z`), today: () => day });
+      const briefAt = async (day: string) => {
+        freeze(day);
+        const r: any = await L.handlers.before_agent_start({ systemPrompt: "BASE" }, mkCtx("/work/acme"));
+        return String(r?.systemPrompt ?? "");
+      };
+      const dueLines = (txt: string) => txt.split("\n").filter((l) => l.startsWith("[到期] "));
+      const has = (txt: string, subject: string) => dueLines(txt).some((l) => l.includes(subject));
+      const before = await briefAt("2026-01-09");
+      ok("冻结到复核日之前：三条都不进到期档", !has(before, "复核"), dueLines(before).join(" | ").slice(0, 100));
+      const onDay = await briefAt("2026-01-15");
+      ok("冻结到当天：早于/等于进到期档", has(onDay, "复核早于冻结日") && has(onDay, "复核等于冻结日"), dueLines(onDay).join(" | ").slice(0, 120));
+      ok("冻结到当天：晚于不进到期档", !has(onDay, "复核晚于冻结日"), dueLines(onDay).join(" | ").slice(0, 120));
+      const after = await briefAt("2026-01-21");
+      ok(
+        "冻结到之后：三条都进到期档",
+        ["复核早于冻结日", "复核等于冻结日", "复核晚于冻结日"].every((x) => has(after, x)),
+        dueLines(after).join(" | ").slice(0, 120),
+      );
+      // 策略写入也走同一个时钟：续期默认 +30 天，不读墙上时钟
+      freeze("2026-01-15");
+      const rn = out(await L.call("living_memory_update", { action: "renew", id: "20260101-000001-a1b2" }));
+      ok("续期日期 = 冻结日 +30 天", rn.includes("review_after=2026-02-14"), rn.split("\n")[0].slice(0, 80));
+      return;
+    }
+    case "config-inject": {
+      const L = await load(home, AUTO_OFF);
+      const { setConfig } = await import("./under-test/living-memory.ts");
+      const ctx = mkCtx("/work/acme");
+      await L.handlers.session_start({ reason: "startup" }, ctx);
+      const briefNow = async () => String(((await L.handlers.before_agent_start({ systemPrompt: "BASE" }, ctx)) as any)?.systemPrompt ?? "");
+      const base = await briefNow();
+      ok("默认上限下简报非空", base.length > 0, `${base.length} 字符`);
+      setConfig({ briefMaxChars: 200 });
+      const tight = await briefNow();
+      ok("注入 briefMaxChars=200 后简报变短", tight.length < base.length, `${base.length} → ${tight.length} 字符`);
+      ok("收紧上限后条目行更少", tight.split("\n").length < base.split("\n").length, `${base.split("\n").length} → ${tight.split("\n").length} 行`);
+      setConfig({ briefMaxChars: 2400 });
+      const back = await briefNow();
+      ok("setConfig 还原后与注入前逐字一致", back === base, `${base.length} / ${back.length} 字符`);
       return;
     }
     default:

@@ -23,6 +23,157 @@ import { spawnSync } from "node:child_process";
 import * as os from "node:os";
 import * as path from "node:path";
 
+// ---------- 注入层：Config / Clock / Logger ----------
+// 策略层原先把「环境变量 / 墙上时钟 / 日志」三件事隐式依赖到进程里；这里改成显式注入，行为与原先逐一对齐：
+// 默认实现仍是同一套读 env、同一套 Date.now()、同一套写盘，只是调用点不再直接摸它们，测试可以换掉。
+
+interface Config {
+  /** LIVING_MEMORY_AUTO_FACT：推断自动按事实的置信度门槛 */
+  autoFactConf: number;
+  /** LIVING_MEMORY_ACTIVITY_MAX：activity.log 轮转阈值（字节） */
+  activityMaxBytes: number;
+  /** LIVING_MEMORY_RECALL_2L：2 字母 ASCII 技术缩写白名单（已 split/trim/小写） */
+  recall2L: string[];
+  /** LIVING_MEMORY_PROMOTE_THRESHOLD：推断转正复合分门槛 */
+  promoteThreshold: number;
+  /** LIVING_MEMORY_NO_AUTO_REVIEW=1：不设默认复核日期 */
+  noAutoReview: boolean;
+  /** LIVING_MEMORY_RECOVERY_DAYS：recovery/ 保留天数 */
+  recoveryRetainDays: number;
+  /** LIVING_MEMORY_AUTO_TRIAGE：原样保留（"0" 强制关 / "1" 强制开 / 其它交给设置） */
+  autoTriage: string | undefined;
+  /** LIVING_MEMORY_AUTO_FACT_EVIDENCE=0：关证据驱动的自动转事实 */
+  autoFactEvidenceOff: boolean;
+  /** LIVING_MEMORY_AUTO_FACT_DAYS：证据驱动转正的最少独立天数 */
+  autoFactMinDays: number;
+  /** LIVING_MEMORY_AUTO_FACT_SCORE：证据驱动转正的最小分（null=用 promoteThreshold） */
+  autoFactMinScore: number | null;
+  /** LIVING_MEMORY_BRIEF_MAX_CHARS：简报总长硬顶 */
+  briefMaxChars: number;
+  /** LIVING_MEMORY_TODO_DIGEST_CHARS：简报里待办正文摘录长度 */
+  todoDigestChars: number;
+  /** LIVING_MEMORY_PROFILE_BRIEF："on"=注入画像 / "off"=不注入 / undefined=看 profile-brief.on 文件 */
+  profileBrief: "on" | "off" | undefined;
+  /** LIVING_MEMORY_SUMMARY_KEEP：summary.md 活动小节保留数 */
+  summaryKeep: number;
+  /** LIVING_MEMORY_MISS_LOG != 0：零命中写 miss.log */
+  missLog: boolean;
+  /** LIVING_MEMORY_QMD：归档检索外挂 qmd 的可执行文件 */
+  qmdBin: string;
+  /** LIVING_MEMORY_QMD_TIMEOUT_MS：qmd 调用超时 */
+  qmdTimeoutMs: number;
+  /** LIVING_MEMORY_RECALL_MAX_ROWS：召回索引行上限 */
+  recallMaxRows: number;
+  /** LIVING_MEMORY_RECALL != 0：简报尾部召回段开关 */
+  recallEnabled: boolean;
+  /** LIVING_MEMORY_DEBUG=1：调试日志落盘 */
+  debug: boolean;
+  /** LIVING_MEMORY_EXTRACT != 0：自动抽取开关 */
+  extractEnabled: boolean;
+  /** LIVING_MEMORY_EXTRACT_MODEL：抽取用的 "provider/model-id"（已 trim） */
+  extractModel: string;
+  /** LIVING_MEMORY_EXTRACT_TIMEOUT_MS：抽取超时 */
+  extractTimeoutMs: number;
+  /** LIVING_MEMORY_START_HINTS != 0：session_start 提示开关 */
+  startHints: boolean;
+  /** LIVING_MEMORY_AUTO_ARCHIVE_KEEP：自动归档 summary 的保留节数 */
+  autoArchiveKeep: number;
+  /** LIVING_MEMORY_AUTO_ARCHIVE=1：超过 autoArchiveKeep 自动归档 */
+  autoArchive: boolean;
+  /** LIVING_MEMORY_PROFILE_AUTO != 0：session_start 刷新画像统计块 */
+  profileAuto: boolean;
+  /** LIVING_MEMORY_BRIEF != 0：简报注入开关 */
+  briefEnabled: boolean;
+}
+
+/** 集中读取 LIVING_MEMORY_* ：解析式与原散读点逐一对齐（Number(...) 保留 NaN、三态开关保留原比较） */
+function loadConfig(env: Record<string, string | undefined> = process.env): Config {
+  const promoteThreshold = Number(env.LIVING_MEMORY_PROMOTE_THRESHOLD ?? 0.8);
+  const autoFactScore = env.LIVING_MEMORY_AUTO_FACT_SCORE;
+  return {
+    autoFactConf: Number(env.LIVING_MEMORY_AUTO_FACT ?? 0.85),
+    activityMaxBytes: Number(env.LIVING_MEMORY_ACTIVITY_MAX ?? 1_000_000),
+    recall2L: (env.LIVING_MEMORY_RECALL_2L ?? "ai,ci,pr,ui,db,ss")
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+    promoteThreshold,
+    noAutoReview: env.LIVING_MEMORY_NO_AUTO_REVIEW === "1",
+    recoveryRetainDays: Number(env.LIVING_MEMORY_RECOVERY_DAYS ?? 180),
+    autoTriage: env.LIVING_MEMORY_AUTO_TRIAGE,
+    autoFactEvidenceOff: env.LIVING_MEMORY_AUTO_FACT_EVIDENCE === "0",
+    autoFactMinDays: Number(env.LIVING_MEMORY_AUTO_FACT_DAYS ?? 3),
+    autoFactMinScore: autoFactScore === undefined ? null : Number(autoFactScore),
+    briefMaxChars: Number(env.LIVING_MEMORY_BRIEF_MAX_CHARS ?? 2400),
+    todoDigestChars: Number(env.LIVING_MEMORY_TODO_DIGEST_CHARS ?? 70),
+    profileBrief: env.LIVING_MEMORY_PROFILE_BRIEF === "1" ? "on" : env.LIVING_MEMORY_PROFILE_BRIEF === "0" ? "off" : undefined,
+    summaryKeep: Number(env.LIVING_MEMORY_SUMMARY_KEEP ?? 60),
+    missLog: env.LIVING_MEMORY_MISS_LOG !== "0",
+    qmdBin: env.LIVING_MEMORY_QMD ?? "qmd",
+    qmdTimeoutMs: Number(env.LIVING_MEMORY_QMD_TIMEOUT_MS ?? 30_000),
+    recallMaxRows: Number(env.LIVING_MEMORY_RECALL_MAX_ROWS ?? 20000),
+    recallEnabled: env.LIVING_MEMORY_RECALL !== "0",
+    debug: env.LIVING_MEMORY_DEBUG === "1",
+    extractEnabled: env.LIVING_MEMORY_EXTRACT !== "0",
+    extractModel: (env.LIVING_MEMORY_EXTRACT_MODEL ?? "").trim(),
+    extractTimeoutMs: Number(env.LIVING_MEMORY_EXTRACT_TIMEOUT_MS ?? 20000),
+    startHints: env.LIVING_MEMORY_START_HINTS !== "0",
+    autoArchiveKeep: Number(env.LIVING_MEMORY_AUTO_ARCHIVE_KEEP ?? 120),
+    autoArchive: env.LIVING_MEMORY_AUTO_ARCHIVE === "1",
+    profileAuto: env.LIVING_MEMORY_PROFILE_AUTO !== "0",
+    briefEnabled: env.LIVING_MEMORY_BRIEF !== "0",
+  };
+}
+
+/** setConfig 注入的覆盖：refreshConfig 重读 env 时要保留，否则注入值会被环境变量冲掉 */
+let configOverrides: Partial<Config> = {};
+/** 启动时读一次 env（与原先的模块级常量同口径） */
+let cfg: Config = loadConfig();
+/** 测试/宿主注入：浅合并进当前 cfg 并记住，后续 refreshConfig 不会冲掉 */
+function setConfig(c: Partial<Config>): void {
+  configOverrides = { ...configOverrides, ...c };
+  cfg = { ...cfg, ...c };
+}
+/** 重读 env 并重新叠加注入值：给原先「每次调用读 env」的点保住原语义 */
+function refreshConfig(): Config {
+  cfg = { ...loadConfig(), ...configOverrides };
+  return cfg;
+}
+
+/** 策略层的唯一时间来源：now() 用毫秒，today() 用「今天」的日期串 */
+interface Clock {
+  now(): number;
+  today(): string;
+}
+/** 默认时钟 = 墙上时钟；today() 与原 today() 同口径（UTC ISO 前 10 位，不是本地日期） */
+const systemClock: Clock = {
+  now: () => Date.now(),
+  today: () => new Date().toISOString().slice(0, 10),
+};
+let clock: Clock = systemClock;
+/** 测试/宿主注入：冻结时钟后，到期分档、addDays、归档戳、锁超时判定全都走它 */
+function setClock(c: Clock): void {
+  clock = c;
+}
+
+/** 策略层的日志出口：activity=审计事实记录，debug=排错线索，warn=异常但可继续 */
+interface Logger {
+  activity(msg: string): void;
+  debug(msg: string): void;
+  warn(msg: string): void;
+}
+/** 默认实现 = 原有写盘行为：activity 写 activity.log（含轮转），debug 仅在 LIVING_MEMORY_DEBUG=1 时落盘，warn 静默（现状本就没有控制台输出） */
+const systemLogger: Logger = {
+  activity: (msg) => appendActivityLog(msg),
+  debug: (msg) => appendDebugLog(msg),
+  warn: () => {},
+};
+let logger: Logger = systemLogger;
+/** 测试/宿主注入：接管日志输出（例如断言「记了哪几条审计」而不落盘） */
+function setLogger(l: Logger): void {
+  logger = l;
+}
+
 const STORE = path.join(os.homedir(), ".pi", "agent", "memory");
 const ENTRIES_DIR = path.join(STORE, "entries");
 // 条目缓存：以「目录 mtime + 文件数」为戳，同一 turn 内多次读取零重复解析；任何写入立即失效
@@ -33,7 +184,7 @@ const PAUSE_FLAG = path.join(STORE, "paused");
 const KINDS = ["preference", "constraint", "commitment", "relation", "correction", "decision", "outcome"] as const;
 const ACTIVE = new Set(["explicit", "event", "inference", "confirmed"]);
 /** 推断自动按事实处理的置信度门槛：>= 即直接 confirmed；低于门槛仍只作弱参考（「待确认」档） */
-const AUTO_FACT_CONF = () => Number(process.env.LIVING_MEMORY_AUTO_FACT ?? 0.85);
+const AUTO_FACT_CONF = () => refreshConfig().autoFactConf; // 原先每次调用读 env，故这里也重读（注入值仍生效）
 /** 自动转事实的排除面：关系类与 needs-confirm 仍需人工点头（错判代价不对称） */
 const autoFactable = (kind: string, conf: number, impact?: string) =>
   Number.isFinite(conf) && conf >= AUTO_FACT_CONF() && kind !== "relation" && impact !== "needs-confirm";
@@ -49,26 +200,31 @@ function entryPath(id: string) {
   return path.join(ENTRIES_DIR, `${id}.md`);
 }
 function newId(): string {
-  const d = new Date();
+  const d = new Date(clock.now());
   const p = (n: number) => String(n).padStart(2, "0");
   const stamp = `${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}-${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}`;
   return `${stamp}-${Math.random().toString(16).slice(2, 6)}`;
 }
-function logActivity(line: string) {
+/** @deprecated 策略层请用 logger.activity(msg)；旧名保留为薄包装 */
+function logActivity(line: string): void {
+  logger.activity(line);
+}
+/** logger.activity 的默认实现：追加 activity.log（月度轮转，失败静默） */
+function appendActivityLog(line: string): void {
   ensureDirs();
   // 审计日志轮转：超过阈值就改名成 activity-YYYY-MM.log，历史仍可 grep，当前文件封顶
-  const maxBytes = Number(process.env.LIVING_MEMORY_ACTIVITY_MAX ?? 1_000_000);
+  const maxBytes = refreshConfig().activityMaxBytes;
   try {
     if (fs.statSync(ACTIVITY).size > maxBytes) {
-      let dest = path.join(STORE, `activity-${new Date().toISOString().slice(0, 7)}.log`);
+      let dest = path.join(STORE, `activity-${new Date(clock.now()).toISOString().slice(0, 7)}.log`);
       let n = 1;
-      while (fs.existsSync(dest)) dest = path.join(STORE, `activity-${new Date().toISOString().slice(0, 7)}-${n++}.log`);
+      while (fs.existsSync(dest)) dest = path.join(STORE, `activity-${new Date(clock.now()).toISOString().slice(0, 7)}-${n++}.log`);
       fs.renameSync(ACTIVITY, dest);
     }
   } catch {
     /* 首次写入或轮转失败都不影响写日志 */
   }
-  fs.appendFileSync(ACTIVITY, `[${new Date().toISOString()}] ${line}\n`);
+  fs.appendFileSync(ACTIVITY, `[${new Date(clock.now()).toISOString()}] ${line}\n`);
 }
 
 // ---------- 抽取失败可见：失败是「没抽成」，和「抽到 0 条」不是一回事 ----------
@@ -82,7 +238,7 @@ interface ExtractFailure {
 }
 
 function noteExtractFailure(reason: string, detail: string): void {
-  const row: ExtractFailure = { ts: new Date().toISOString(), reason, detail: String(detail ?? "").slice(0, 240) };
+  const row: ExtractFailure = { ts: new Date(clock.now()).toISOString(), reason, detail: String(detail ?? "").slice(0, 240) };
   try {
     ensureDirs();
     let lines: string[] = [];
@@ -97,7 +253,7 @@ function noteExtractFailure(reason: string, detail: string): void {
   } catch {
     /* 失败记录本身写不进去也不能影响主流程 */
   }
-  logActivity(`extract failed ${reason}: ${row.detail}`);
+  logger.activity(`extract failed ${reason}: ${row.detail}`);
 }
 
 function extractFailures(): ExtractFailure[] {
@@ -119,7 +275,7 @@ function extractFailures(): ExtractFailure[] {
 }
 
 function recentExtractFailures(hours = 24): ExtractFailure[] {
-  const since = Date.now() - hours * 3600e3;
+  const since = clock.now() - hours * 3600e3;
   return extractFailures().filter((f) => {
     const t = Date.parse(f.ts);
     return Number.isFinite(t) && t >= since;
@@ -179,13 +335,13 @@ function writeAtomic(file: string, text: string) {
 function withFileLockSync<T>(file: string, fn: () => T): T {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const lock = `${file}.lock`;
-  const deadline = Date.now() + 3000;
+  const deadline = clock.now() + 3000;
   const sleeper = new Int32Array(new SharedArrayBuffer(4));
   for (;;) {
     try {
       const fd = fs.openSync(lock, "wx");
       try {
-        fs.writeSync(fd, `${process.pid} ${new Date().toISOString()}`);
+        fs.writeSync(fd, `${process.pid} ${new Date(clock.now()).toISOString()}`);
         fs.closeSync(fd);
       } catch {
         // 锁内容写失败不影响互斥
@@ -194,14 +350,14 @@ function withFileLockSync<T>(file: string, fn: () => T): T {
     } catch (err: any) {
       if (err?.code !== "EEXIST") throw err;
       try {
-        if (Date.now() - fs.statSync(lock).mtimeMs > 30_000) {
+        if (clock.now() - fs.statSync(lock).mtimeMs > 30_000) {
           fs.unlinkSync(lock);
           continue;
         }
       } catch {
         continue; // 锁刚被释放，立即重试
       }
-      if (Date.now() > deadline) {
+      if (clock.now() > deadline) {
         try {
           fs.unlinkSync(lock);
         } catch {
@@ -233,12 +389,7 @@ const IDX_VERSION = 4;
  * 2 字母 ASCII 白名单：`ai/ci/pr/ui/db/ss` 这类本是技术标识符，被 ≥3 的规则误杀会让「PR 评审」「CI 失败」
  * 这类提问召回不到。默认值可被 `LIVING_MEMORY_RECALL_2L` 覆盖/追加（逗号分隔，全小写）。
  */
-const ASCII_SHORT_OK = new Set(
-  (process.env.LIVING_MEMORY_RECALL_2L ?? "ai,ci,pr,ui,db,ss")
-    .split(",")
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean),
-);
+const ASCII_SHORT_OK = new Set(cfg.recall2L);
 /**
  * 召回词元：索引与查询共用同一套切法，避免 BM25 只在一边成立。
  * 中文走 bigram：每个连续汉字段取所有相邻两字组合，单字段保留其本身。
@@ -397,7 +548,7 @@ class FileEntryStore implements EntryStore {
     fs.mkdirSync(RECOVERY_DIR, { recursive: true });
     fs.writeFileSync(
       recoveryPath(e.meta.id),
-      JSON.stringify({ meta: e.meta, body: e.body, deleted_at: new Date().toISOString(), note: note ?? "" }, null, 2),
+      JSON.stringify({ meta: e.meta, body: e.body, deleted_at: new Date(clock.now()).toISOString(), note: note ?? "" }, null, 2),
     );
     const liveFile = entryPath(e.meta.id);
     const coldFile = path.join(EXPIRED_DIR, `${e.meta.id}.md`);
@@ -469,7 +620,7 @@ class FileEntryStore implements EntryStore {
     const { closed, due } = this.purgeCandidates(olderDays);
     if (dryRun || !due.length) return { candidates: due, moved: 0, closed };
     fs.mkdirSync(EXPIRED_DIR, { recursive: true });
-    const month = new Date().toISOString().slice(0, 7);
+    const month = new Date(clock.now()).toISOString().slice(0, 7);
     const idx = path.join(EXPIRED_DIR, `index-${month}.md`);
     const head = fs.existsSync(idx) ? "" : `# expired 归档索引 ${month}\n\n| id | kind | status | 记录日 | subject |\n|---|---|---|---|---|\n`;
     const rows = due.map((e) => {
@@ -711,7 +862,7 @@ class FileTodoStore implements TodoStore {
     const line = lines[idx] ?? "";
     if (!TODO_LINE_RE.test(line)) return null;
     const body = line.replace(DONE_MARK_RE, "").replace(/^- \[([ xX])\] /, "");
-    lines[idx] = done ? `- [x] ${body} <!-- done: ${new Date().toISOString().slice(0, 10)} -->` : `- [ ] ${body}`;
+    lines[idx] = done ? `- [x] ${body} <!-- done: ${new Date(clock.now()).toISOString().slice(0, 10)} -->` : `- [ ] ${body}`;
     this.write(lines);
     return lines[idx];
   }
@@ -781,7 +932,7 @@ class FileTodoStore implements TodoStore {
       rest.splice(i, 0, pointer);
     }
     this.write(rest);
-    logActivity(`todo archive moved=${done.length} total=${total} file=todo-archive.md`);
+    logger.activity(`todo archive moved=${done.length} total=${total} file=todo-archive.md`);
     return done.length;
   }
 
@@ -942,8 +1093,6 @@ function bodySimilar(a: string, b: string): boolean {
 // 隐私/决策类（relation/decision/outcome）与含糊表述扣分；转正还必须独立证据 ≥2。
 type Ev = { at: string; kind: string; id?: string; note?: string };
 const HEDGE_MARK = /(可能|大概|也许|或许|待定|尚不确定|不确定|估计|应该是|似乎|推测|不一定)/;
-const PROMOTE_THRESHOLD = Number(process.env.LIVING_MEMORY_PROMOTE_THRESHOLD ?? 0.8);
-
 function evidenceOf(meta: Meta): Ev[] {
   try {
     const v = JSON.parse(meta.evidence || "[]");
@@ -962,7 +1111,7 @@ function appendEvidence(e: Entry, ev: Ev): string | null {
   const meta = { ...e.meta, evidence: JSON.stringify(next) };
   entryStore.put({ meta, body: e.body });
   const s = promoteScore({ meta, body: e.body });
-  logActivity(`evidence +1 ${e.meta.id} kind=${ev.kind} total=${next.length} score=${s.score.toFixed(2)}`);
+  logger.activity(`evidence +1 ${e.meta.id} kind=${ev.kind} total=${next.length} score=${s.score.toFixed(2)}`);
   return `${e.meta.id} 证据 +1（${ev.kind}，累计 ${next.length} 条 / ${s.days} 天 / ${s.independent} 源，转正分 ${s.score.toFixed(2)}${s.gate ? "，已越过门槛，可用 confirm 转正" : ""}）`;
 }
 /** 复合分：返回 score 与各分项，供 promote_scan 展示与人工判断 */
@@ -980,14 +1129,14 @@ function promoteScore(e: Entry) {
   if (HEDGE_MARK.test(e.body) || HEDGE_MARK.test(e.meta.subject ?? "")) penalty += 0.2;
   const score = Math.min(Math.max(base + repeat + restate - penalty, 0), 1);
   const blocked = kind === "relation" || e.meta.action_impact === "needs-confirm";
-  const gate = score >= PROMOTE_THRESHOLD && independent >= 2 && !blocked;
+  const gate = score >= cfg.promoteThreshold && independent >= 2 && !blocked;
   return { score, base, repeat, restate, penalty, days: days.size, independent, blocked, gate };
 }
 
 /** 只读扫描：按复合分排序打印，不写任何文件（转正在后续步骤里才开启） */
 /** 月度风格归纳（只读；写 profile 由人或 agent 做）：把窗口内的偏好/纠正/雷区摆出来当归纳材料 */
 function opStyleScan(days = 30, limit = 20): string {
-  const since = new Date(Date.now() - days * 86400e3).toISOString();
+  const since = new Date(clock.now() - days * 86400e3).toISOString();
   const rows = entryStore.list().filter(
     (r) =>
       r.meta.status !== "expired" &&
@@ -1021,11 +1170,11 @@ function opStyleScan(days = 30, limit = 20): string {
     "`LIVING_MEMORY_PROFILE_BRIEF=1` 打开后，这两节会被压成一行注入每轮简报。",
   );
   try {
-    fs.writeFileSync(path.join(STORE, "profile-style.last"), new Date().toISOString());
+    fs.writeFileSync(path.join(STORE, "profile-style.last"), new Date(clock.now()).toISOString());
   } catch {
     /* 戳写不进去不影响结果 */
   }
-  logActivity(`style_scan days=${days} rows=${rows.length} neg=${neg.length}`);
+  logger.activity(`style_scan days=${days} rows=${rows.length} neg=${neg.length}`);
   return lines.join("\n");
 }
 
@@ -1033,7 +1182,7 @@ function opStyleScan(days = 30, limit = 20): string {
 function styleScanOverdue(days = 30): boolean {
   try {
     const at = fs.readFileSync(path.join(STORE, "profile-style.last"), "utf8").trim();
-    return Date.now() - Date.parse(at) > days * 86400e3;
+    return clock.now() - Date.parse(at) > days * 86400e3;
   } catch {
     return true;
   }
@@ -1062,7 +1211,7 @@ function opPromoteScan(limit = 20): string {
   );
   const avg = sorted.reduce((a, b) => a + b.s.score, 0) / sorted.length;
   return (
-    `推断转正评分（阈值 ${PROMOTE_THRESHOLD}，独立证据 ≥2，本命令只读不改状态）\n` +
+    `推断转正评分（阈值 ${cfg.promoteThreshold}，独立证据 ≥2，本命令只读不改状态）\n` +
     `活动 ${sorted.length} 条 · 平均 ${avg.toFixed(2)} · 最高 ${sorted[0].s.score.toFixed(2)} · 越过门槛 ${over} 条\n\n` +
     lines.join("\n") +
     (sorted.length > n ? `\n…（另有 ${sorted.length - n} 条未显示，limit 可调）` : "")
@@ -1074,18 +1223,18 @@ function findConflicting(kind: string, subject: string, text: string): Entry | n
 }
 
 function today(): string {
-  return new Date().toISOString().slice(0, 10);
+  return clock.today();
 }
 
 /** 按 kind 的复核间隔（天）：0=不设默认复核日期；settings.livingMemory.reviewDays 可覆盖 */
 function reviewDays(kind: string, basis: string): number {
   const defaults: Record<string, number> = { decision: 60, outcome: 60, inference: 30, default: 180 };
   try {
-    const cfg = readSettings?.()?.livingMemory?.reviewDays as Record<string, number> | undefined;
-    if (cfg) {
-      if (typeof cfg[`${basis}`] === "number") return cfg[`${basis}`];
-      if (typeof cfg[`${kind}`] === "number") return cfg[`${kind}`];
-      if (typeof cfg.default === "number") return cfg.default;
+    const custom = readSettings?.()?.livingMemory?.reviewDays as Record<string, number> | undefined;
+    if (custom) {
+      if (typeof custom[`${basis}`] === "number") return custom[`${basis}`];
+      if (typeof custom[`${kind}`] === "number") return custom[`${kind}`];
+      if (typeof custom.default === "number") return custom.default;
     }
   } catch {
     /* 读不到设置就用内置默认 */
@@ -1095,14 +1244,14 @@ function reviewDays(kind: string, basis: string): number {
 
 /** 默认复核日期：decision/outcome 60 天，inference 30 天，其余 180 天（reviewDays 可改；0=不设） */
 function defaultReviewAfter(basis: string, kind = ""): string {
-  if (process.env.LIVING_MEMORY_NO_AUTO_REVIEW === "1") return "";
+  if (refreshConfig().noAutoReview) return "";
   const days = reviewDays(kind, basis);
   if (!days) return "";
-  return new Date(Date.now() + days * 86400e3).toISOString().slice(0, 10);
+  return new Date(clock.now() + days * 86400e3).toISOString().slice(0, 10);
 }
 
 function addDays(n: number): string {
-  return new Date(Date.now() + n * 86400e3).toISOString().slice(0, 10);
+  return new Date(clock.now() + n * 86400e3).toISOString().slice(0, 10);
 }
 function isDue(meta: Meta): boolean {
   const t = today();
@@ -1158,9 +1307,9 @@ function opConfirm(e: Entry, note?: string): string {
   if (!["inference", "event", "explicit"].includes(e.meta.status))
     return `${e.meta.id} status=${e.meta.status}，无需确认。`;
   e.meta.status = "confirmed";
-  e.meta.confirmed_at = new Date().toISOString();
+  e.meta.confirmed_at = new Date(clock.now()).toISOString();
   entryStore.put({ meta: e.meta, body: e.body });
-  logActivity(`confirmed ${e.meta.id}${note ? ` note=${note}` : ""}`);
+  logger.activity(`confirmed ${e.meta.id}${note ? ` note=${note}` : ""}`);
   return `${e.meta.id} 已确认为 confirmed 事实。`;
 }
 
@@ -1179,8 +1328,8 @@ function opSupersede(e: Entry, text: string, note?: string): string {
     subject: old.subject,
     scope: old.scope,
     source: `${old.source} → 纠正于 ${today()}${note ? `（${note}）` : ""}`,
-    obtained_at: new Date().toISOString(),
-    confirmed_at: new Date().toISOString(),
+    obtained_at: new Date(clock.now()).toISOString(),
+    confirmed_at: new Date(clock.now()).toISOString(),
     expires_at: old.expires_at,
     review_after: old.review_after,
     confidence: "",
@@ -1192,7 +1341,7 @@ function opSupersede(e: Entry, text: string, note?: string): string {
   old.status = "superseded";
   old.superseded_by = nid;
   entryStore.put({ meta: old, body: e.body });
-  logActivity(`supersede ${old.id} -> ${nid}`);
+  logger.activity(`supersede ${old.id} -> ${nid}`);
   // 替代链深度：同一 subject 反复纠正时提示合并，防止同主题攒出十几代版本
   let depth = 1;
   const seen = new Set<string>([old.id]);
@@ -1213,7 +1362,7 @@ function opRenew(e: Entry, reviewAfter?: string, expiresAt?: string): string {
   // 已失效（在 expired/ 或盘上 status=expired）的条目：renew 即复活——搬回 entries/ 并转为 explicit
   const resurrect = e.meta.status === "expired";
   if (!resurrect && !ACTIVE.has(e.meta.status)) return `${e.meta.id} status=${e.meta.status}，非活动条目，不能续期。`;
-  const ra = reviewAfter || new Date(Date.now() + 30 * 86400e3).toISOString().slice(0, 10);
+  const ra = reviewAfter || new Date(clock.now() + 30 * 86400e3).toISOString().slice(0, 10);
   const patch: Meta = { review_after: ra };
   if (expiresAt) patch.expires_at = expiresAt;
   if (resurrect) {
@@ -1225,7 +1374,7 @@ function opRenew(e: Entry, reviewAfter?: string, expiresAt?: string): string {
     Object.assign(e.meta, patch);
     entryStore.put({ meta: e.meta, body: e.body });
   }
-  logActivity(`renew ${e.meta.id} review_after=${ra} status=${e.meta.status}${resurrect ? " resurrect=1" : ""}`);
+  logger.activity(`renew ${e.meta.id} review_after=${ra} status=${e.meta.status}${resurrect ? " resurrect=1" : ""}`);
   return resurrect
     ? `${e.meta.id} 已复活（expired → explicit，搬回 entries/），review_after=${ra}。`
     : `${e.meta.id} 已续期，review_after=${ra}（status 保持 ${e.meta.status}：续期≠确认，转正仍需显式 confirm）。`;
@@ -1233,7 +1382,7 @@ function opRenew(e: Entry, reviewAfter?: string, expiresAt?: string): string {
 
 function opExpire(e: Entry, note?: string): string {
   const moved = entryStore.expire(e);
-  logActivity(`expire ${e.meta.id} moved=${moved ? "expired/" : "-"}${note ? ` note=${note}` : ""}`);
+  logger.activity(`expire ${e.meta.id} moved=${moved ? "expired/" : "-"}${note ? ` note=${note}` : ""}`);
   return `${e.meta.id} 已标记过期${moved ? "并移入 expired/" : ""}（不再参与检索；restore 可取回，补 renew 即复活）。`;
 }
 
@@ -1245,7 +1394,7 @@ function ageDays(meta: Meta): number {
   const iso = meta.expires_at || meta.obtained_at;
   const t = Date.parse(iso);
   if (!Number.isFinite(t)) return 0;
-  return (Date.now() - t) / 86_400_000;
+  return (clock.now() - t) / 86_400_000;
 }
 
 /** 把 status=expired/superseded 且超过 older_than_days 的条目移入 expired/；dry_run 默认 true */
@@ -1256,18 +1405,16 @@ function opPurgeExpired(olderDays = 30, dry = true): string {
   const lines = due.map((e) => `${e.meta.id}（${e.meta.kind}/${e.meta.status}/${e.meta.obtained_at.slice(0, 10)}）${e.meta.subject}`);
   if (dry)
     return `候选 ${due.length} 条（dry_run，未移动）：\n${lines.slice(0, 15).join("\n")}${due.length > 15 ? `\n…（还有 ${due.length - 15} 条）` : ""}\n确认无误会后传 dry_run=false 执行：文件移到 expired/，仍可用 restore 取回。`;
-  logActivity(`purge_expired n=${moved} older_than_days=${olderDays} ids=${due.map((e) => e.meta.id).join(",")}`);
-  return `已清理 ${moved} 条到 expired/（索引 expired/index-${new Date().toISOString().slice(0, 7)}.md，restore 可取回）：\n${lines.slice(0, 10).join("\n")}${due.length > 10 ? "\n…" : ""}`;
+  logger.activity(`purge_expired n=${moved} older_than_days=${olderDays} ids=${due.map((e) => e.meta.id).join(",")}`);
+  return `已清理 ${moved} 条到 expired/（索引 expired/index-${new Date(clock.now()).toISOString().slice(0, 7)}.md，restore 可取回）：\n${lines.slice(0, 10).join("\n")}${due.length > 10 ? "\n…" : ""}`;
 }
-
-const RECOVERY_RETAIN_DAYS = Number(process.env.LIVING_MEMORY_RECOVERY_DAYS ?? 180);
 
 function recoveryAgeDays(file: string): number {
-  return (Date.now() - fs.statSync(file).mtimeMs) / 86_400_000;
+  return (clock.now() - fs.statSync(file).mtimeMs) / 86_400_000;
 }
 
-/** 已删条目在 recovery/ 只保留 RECOVERY_RETAIN_DAYS 天，到期物理删；dry_run 默认 true */
-function rotateRecovery(days = RECOVERY_RETAIN_DAYS, dry = true): string {
+/** 已删条目在 recovery/ 只保留 cfg.recoveryRetainDays 天，到期物理删；dry_run 默认 true */
+function rotateRecovery(days = cfg.recoveryRetainDays, dry = true): string {
   if (!fs.existsSync(RECOVERY_DIR)) return "recovery/ 为空，无需轮转。";
   const files = fs.readdirSync(RECOVERY_DIR).filter((f) => f.endsWith(".json"));
   const due = files.filter((f) => recoveryAgeDays(path.join(RECOVERY_DIR, f)) >= days);
@@ -1279,7 +1426,7 @@ function rotateRecovery(days = RECOVERY_RETAIN_DAYS, dry = true): string {
       due.length > 15 ? `\n…（还有 ${due.length - 15} 条）` : ""
     }\n确认后传 dry_run=false；删除后这些条目不再可 restore。`;
   for (const f of due) fs.unlinkSync(path.join(RECOVERY_DIR, f));
-  logActivity(`rotate_recovery n=${due.length} retain=${days}d ids=${names.join(",")}`);
+  logger.activity(`rotate_recovery n=${due.length} retain=${days}d ids=${names.join(",")}`);
   return `已物理删除 ${due.length} 条超过 ${days} 天的 recovery 记录（这些条目不再可 restore）。`;
 }
 
@@ -1315,7 +1462,7 @@ function opExpireBatch(sel: { kind?: string; scope?: string; subject?: string },
   if (dry)
     return `候选 ${pick.length} 条（dry_run，未改动）：\n${lines.slice(0, 15).join("\n")}${more}\n确认后传 dry_run=false；每条都可 renew 复活。`;
   for (const e of pick) entryStore.expire(e);
-  logActivity(`expire-batch n=${pick.length} kind=${sel.kind ?? "-"} scope=${sel.scope ?? "-"} subject=${sel.subject ?? "-"}${note ? ` note=${note}` : ""}`);
+  logger.activity(`expire-batch n=${pick.length} kind=${sel.kind ?? "-"} scope=${sel.scope ?? "-"} subject=${sel.subject ?? "-"}${note ? ` note=${note}` : ""}`);
   return `已批量失效 ${pick.length} 条（status=expired，renew 可复活）：\n${lines.slice(0, 10).join("\n")}${pick.length > 10 ? "\n…" : ""}`;
 }
 const RECOVERY_DIR = path.join(STORE, "recovery");
@@ -1326,7 +1473,7 @@ function recoveryPath(id: string) {
 
 function opDelete(e: Entry, note?: string): string {
   entryStore.delete(e, note);
-  logActivity(
+  logger.activity(
     `delete ${e.meta.id} kind=${e.meta.kind} subject=${e.meta.subject} source="${e.meta.source}" body="${e.body.slice(0, 160)}"${note ? ` note=${note}` : ""} recovery=${e.meta.id}.json`,
   );
   return `${e.meta.id} 已删除（完整内容存于 recovery/${e.meta.id}.json，可用 living_memory_update action=restore id=${e.meta.id} 恢复）。`;
@@ -1337,14 +1484,14 @@ function opRestore(idPrefix: string): string {
   // 先看 expired/（purge_expired 转移过来的条目在这里，文件本身完好）
   const fromExpired = entryStore.restore(idPrefix, { from: "expired" });
   if (fromExpired) {
-    logActivity(`restore ${fromExpired.meta.id} from=expired/`);
+    logger.activity(`restore ${fromExpired.meta.id} from=expired/`);
     return `${fromExpired.meta.id} 已从 expired/ 恢复（status=expired，仍不参与检索；要复活需再来一次 renew）。`;
   }
   const ids = entryStore.recoverableIds();
   if (!ids) return "没有可恢复记录（recovery/ 为空）。";
   const rec = entryStore.restore(idPrefix, { from: "recovery" });
   if (rec) {
-    logActivity(`restore ${rec.meta.id} kind=${rec.meta.kind} subject=${rec.meta.subject}`);
+    logger.activity(`restore ${rec.meta.id} kind=${rec.meta.kind} subject=${rec.meta.subject}`);
     return `${rec.meta.id} 已从 recovery 恢复（status=${rec.meta.status}）。`;
   }
   // 记录还在 = 命中前缀但条目本就还在 entries/，restore 幂等跳过
@@ -1374,7 +1521,7 @@ const PROCEDURAL_MARK = /(待用户回答|待用户批准|待批准|待用户确
 let readSettings: (() => any) | null = null;
 
 function autoTriageEnabled(): boolean {
-  const env = process.env.LIVING_MEMORY_AUTO_TRIAGE;
+  const env = refreshConfig().autoTriage;
   if (env === "0") return false; // 环境变量优先，可临时关
   if (env === "1") return true;
   try {
@@ -1418,7 +1565,7 @@ function autoTriage(trigger: string): string[] {
     opExpire(e, `auto-triage ${rule} (${trigger})`);
     acted.push(`${e.meta.id}（${rule}）`);
   }
-  if (acted.length) logActivity(`auto-triage ${trigger}: ${acted.length} 条 → ${acted.join("; ")}`);
+  if (acted.length) logger.activity(`auto-triage ${trigger}: ${acted.length} 条 → ${acted.join("; ")}`);
   return acted;
 }
 
@@ -1469,15 +1616,16 @@ function autoFactRetro(limit = 10): string[] {
     opConfirm(e, `auto-fact retro conf=${conf}`);
     acted.push(`${r.id}（conf ${conf}）`);
   }
-  if (acted.length) logActivity(`auto-fact retro: ${acted.length} 条 → ${acted.join("; ")}`);
+  if (acted.length) logger.activity(`auto-fact retro: ${acted.length} 条 → ${acted.join("; ")}`);
   return acted;
 }
 
 /** B：证据驱动的自动转事实。独立日期 >=3 天、复合分 >= 门槛、且非关系/需确认即视为事实 */
 function autoFactEvidence(limit = 5): string[] {
-  if (process.env.LIVING_MEMORY_AUTO_FACT_EVIDENCE === "0" || isPaused()) return [];
-  const minDays = Number(process.env.LIVING_MEMORY_AUTO_FACT_DAYS ?? 3);
-  const minScore = Number(process.env.LIVING_MEMORY_AUTO_FACT_SCORE ?? PROMOTE_THRESHOLD);
+  const c = refreshConfig();
+  if (c.autoFactEvidenceOff || isPaused()) return [];
+  const minDays = c.autoFactMinDays;
+  const minScore = c.autoFactMinScore ?? c.promoteThreshold;
   const acted: string[] = [];
   const cands = entryStore.list().filter((r) => r.meta.status === "inference");
   for (const r of cands) {
@@ -1490,7 +1638,7 @@ function autoFactEvidence(limit = 5): string[] {
     opConfirm(e, `auto-fact evidence days=${s.days} score=${s.score.toFixed(2)}`);
     acted.push(`${r.id}（${s.days} 天 / 分 ${s.score.toFixed(2)}）`);
   }
-  if (acted.length) logActivity(`auto-fact evidence: ${acted.length} 条 → ${acted.join("; ")}`);
+  if (acted.length) logger.activity(`auto-fact evidence: ${acted.length} 条 → ${acted.join("; ")}`);
   return acted;
 }
 
@@ -1498,9 +1646,7 @@ function autoFactEvidence(limit = 5): string[] {
 // 简报改为分档配额：到期 > 待确认推断 > 当前项目 scope > 全局，各档独立上限；
 // 每行 subject 42 字符 + 正文摘录，总长硬顶（默认 2400，LIVING_MEMORY_BRIEF_MAX_CHARS 可调）；
 // 被裁掉的条数显式告知而不是静默丢弃——目录条目会随迁移持续增长。
-const BRIEF_MAX_CHARS = Number(process.env.LIVING_MEMORY_BRIEF_MAX_CHARS ?? 2400);
 const BRIEF_LINE_CHARS = 130;
-const TODO_DIGEST_CHARS = Number(process.env.LIVING_MEMORY_TODO_DIGEST_CHARS ?? 70);
 const TODO_DIGEST_RESERVE = 150;
 
 /** 画像摘要：只取「三、对外口径」「四、沟通与协作习惯」两节正文（人写结论），去标记与占位，压成一行 */
@@ -1531,8 +1677,9 @@ function profileDigest(max = 200): string {
 }
 
 const PROFILE_BRIEF_ON = () => {
-  if (process.env.LIVING_MEMORY_PROFILE_BRIEF === "1") return true;
-  if (process.env.LIVING_MEMORY_PROFILE_BRIEF === "0") return false;
+  const c = refreshConfig();
+  if (c.profileBrief === "on") return true;
+  if (c.profileBrief === "off") return false;
   try {
     return fs.existsSync(path.join(STORE, "profile-brief.on"));
   } catch {
@@ -1548,7 +1695,6 @@ const SUMMARY_FILE = path.join(STORE, "summary.md");
 const SUMMARY_INDEX_FILE = path.join(STORE, "summary-index.json");
 const SUMMARY_ARCHIVE_FILE = path.join(STORE, "summary-archive.md");
 /** 活动小节保留数：超过就提示（或按 LIVING_MEMORY_AUTO_ARCHIVE 自动）归档 */
-const SUMMARY_KEEP = Number(process.env.LIVING_MEMORY_SUMMARY_KEEP ?? 60);
 
 // 早期版本用大写文件名。若只剩大写孪生文件就改名为小写；两边都在则记下来，交给 session_start 提示人工合并（通常是陈旧实例又写回来的）。
 const LEGACY_PAIRS: Array<[string, string]> = [
@@ -1633,7 +1779,7 @@ const pad2 = (n: number): string => String(n).padStart(2, "0");
 
 /** 本地日期（不用 toISOString：UTC 会把「今天」算错一天） */
 function localDay(offsetDays = 0): string {
-  const d = new Date();
+  const d = new Date(clock.now());
   d.setDate(d.getDate() + offsetDays);
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 }
@@ -1853,7 +1999,7 @@ class FileSummaryStore implements SummaryStore {
     const moved: SummaryArchiveMove[] = move.map((s) => ({ num: s.num, title: s.title }));
     if (dryRun) return { sections: sections.length, moved };
     const moveNums = new Set(move.map((s) => s.num));
-    const stamp = new Date().toISOString().slice(0, 10);
+    const stamp = new Date(clock.now()).toISOString().slice(0, 10);
     const out: string[] = [...preamble];
     for (const s of sections) {
       if (!moveNums.has(s.num)) {
@@ -1992,7 +2138,7 @@ function opSummaryAdd(project: string, title: string, body: string): string {
   if (!proj || !t) return "summary_add 必须带 project（`## ` 节名关键词）与 title。";
   if (!body.trim()) return "summary_add 必须带 body（正文，按 `- ` 条目写入）。";
   const { num, created } = summaryStore.add(proj, t, body);
-  logActivity(`summary add ${proj} :: ${t} (#${num})`);
+  logger.activity(`summary add ${proj} :: ${t} (#${num})`);
   return `已写入 summary.md：${created ? `新建节「${proj}」` : `「${proj}」节`} #${num} ${t}`;
 }
 function opSummaryUpdate(match: string, body: string): string {
@@ -2005,7 +2151,7 @@ function opSummaryUpdate(match: string, body: string): string {
       .slice(0, 5)
       .map((t) => `- ${t}`)
       .join("\n")}`;
-  logActivity(`summary update ${matched[0]}`);
+  logger.activity(`summary update ${matched[0]}`);
   return `已改写 summary.md 小节「${matched[0]}」的正文（标题与编号不变）。`;
 }
 
@@ -2028,7 +2174,7 @@ function summarySections(lines: string[]): { preamble: string[]; sections: Summa
 }
 
 /** 归档最老的 N 个 `### [NN]` 小节到 summary-archive.md；dry_run 默认 true */
-function opSummaryArchive(keep = SUMMARY_KEEP, dry = true): string {
+function opSummaryArchive(keep = cfg.summaryKeep, dry = true): string {
   const { sections, moved } = summaryStore.archive(keep, dry);
   if (!moved.length) return `summary.md 共 ${sections} 个小节，未超过保留数 ${keep}，无需归档。`;
   const list = moved.map((s) => `[${String(s.num).padStart(2, "0")}] ${s.title.slice(0, 40)}`);
@@ -2036,7 +2182,7 @@ function opSummaryArchive(keep = SUMMARY_KEEP, dry = true): string {
     return `可归档 ${moved.length} 个小节（dry_run，未改动；活动保留 ${keep} 个最新）：\n${list
       .slice(0, 12)
       .join("\n")}${list.length > 12 ? `\n…（还有 ${list.length - 12} 个）` : ""}\n确认后传 dry_run=false。`;
-  logActivity(`summary archive n=${moved.length} keep=${keep} nums=${moved.map((s) => s.num).join(",")}`);
+  logger.activity(`summary archive n=${moved.length} keep=${keep} nums=${moved.map((s) => s.num).join(",")}`);
   return `已归档 ${moved.length} 个小节到 summary-archive.md（活动 summary.md 保留 ${keep} 个）：${moved
     .map((s) => `[${s.num}]`)
     .join("、")}`;
@@ -2056,7 +2202,7 @@ function searchSummaryArchive(q: string, limit = 8): string {
   return `summary-archive 共 ${blocks.length} 节，命中 ${hits.length}（显示 ${Math.min(hits.length, lim)} 节，最新归档在前）：\n\n${body}`;
 }
 
-/** 取匹配 cwd 名的小节里的未完成待办，正文压缩到 TODO_DIGEST_CHARS */
+/** 取匹配 cwd 名的小节里的未完成待办，正文压缩到 cfg.todoDigestChars */
 function todoDigest(baseName: string, limit: number): Array<{ section: string; text: string }> {
   const out: Array<{ section: string; text: string }> = [];
   const want = baseName.toLowerCase();
@@ -2064,7 +2210,7 @@ function todoDigest(baseName: string, limit: number): Array<{ section: string; t
     if (!row.section.toLowerCase().includes(want)) continue;
     out.push({
       section: row.section.slice(0, 18),
-      text: row.text.length > TODO_DIGEST_CHARS ? `${row.text.slice(0, TODO_DIGEST_CHARS)}…` : row.text,
+      text: row.text.length > cfg.todoDigestChars ? `${row.text.slice(0, cfg.todoDigestChars)}…` : row.text,
     });
     if (out.length >= limit) break;
   }
@@ -2106,7 +2252,7 @@ function opTodoAdd(text: string, section?: string, project?: string, tags?: stri
     if (res.reason === "no-file") return "（todo.md 不存在）";
     return `找不到小节「${section}」；现有小节：${res.sections.join(" / ")}`;
   }
-  logActivity(`todo_add ${body.slice(0, 60)}`);
+  logger.activity(`todo_add ${body.slice(0, 60)}`);
   return `已加入待办：${shortTodo(item)}\ntodo.md：${todoSummaryText()}`;
 }
 
@@ -2115,7 +2261,7 @@ function opTodoToggleAt(idx: number, done: boolean): string {
   const line = todoStore.setDoneAt(idx, done);
   if (line === null) return `${idx} 行不是待办条目（可能已被其他会话改动，请重开面板）`;
   const body = line.replace(DONE_MARK_RE, "").replace(/^- \[([ xX])\] /, "");
-  logActivity(`todo_${done ? "done" : "undo"}@L${idx} ${body.slice(0, 60)}`);
+  logger.activity(`todo_${done ? "done" : "undo"}@L${idx} ${body.slice(0, 60)}`);
   return `${done ? "已勾选完成" : "已恢复未完成"}：${shortTodo(line)}\ntodo.md：${todoSummaryText()}`;
 }
 
@@ -2131,7 +2277,7 @@ function opTodoSet(match: string, done: boolean): string {
   const line = todoStore.setDoneAt(target.idx, done);
   if (line === null) return `${target.idx} 行不是待办条目（可能已被其他会话改动，请重开面板）`;
   const body = line.replace(DONE_MARK_RE, "").replace(/^- \[([ xX])\] /, "");
-  logActivity(`todo_${done ? "done" : "undo"} ${body.slice(0, 60)}`);
+  logger.activity(`todo_${done ? "done" : "undo"} ${body.slice(0, 60)}`);
   return `${done ? "已勾选完成" : "已恢复未完成"}：${shortTodo(line)}\ntodo.md：${todoSummaryText()}`;
 }
 
@@ -2146,7 +2292,7 @@ function opTodoEdit(match: string, text: string): string {
   const target = hits[0];
   const line = todoStore.editAt(target.idx, body);
   if (line === null) return `${target.idx} 行不是待办条目（可能已被其他会话改动，请重开面板）`;
-  logActivity(`todo_edit@L${target.idx} ${body.slice(0, 60)}`);
+  logger.activity(`todo_edit@L${target.idx} ${body.slice(0, 60)}`);
   return `已改写待办：${shortTodo(line)}\ntodo.md：${todoSummaryText()}`;
 }
 /** 按唯一命中删除待办行 */
@@ -2158,7 +2304,7 @@ function opTodoDelete(match: string): string {
   const target = hits[0];
   const removed = todoStore.deleteAt(target.idx);
   if (removed === null) return `${target.idx} 行不是待办条目（可能已被其他会话改动，请重开面板）`;
-  logActivity(`todo_delete@L${target.idx} ${shortTodo(removed, 60)}`);
+  logger.activity(`todo_delete@L${target.idx} ${shortTodo(removed, 60)}`);
   return `已删除待办：${shortTodo(removed)}\ntodo.md：${todoSummaryText()}`;
 }
 
@@ -2216,10 +2362,10 @@ type EntrySearchParams = {
 
 /** 记一行零命中（q 至少 2 字符）；miss.log 保留最后 200 行。整个读—改—写进文件锁，写失败静默 */
 function noteSearchMiss(q: string, cwd?: string, scope?: string): void {
-  if (process.env.LIVING_MEMORY_MISS_LOG === "0" || q.length < 2) return;
+  if (!refreshConfig().missLog || q.length < 2) return;
   try {
     ensureDirs();
-    const line = `${new Date().toISOString()} | q=${q.replace(/\r?\n/g, " ")} | cwd=${path.basename(cwd ?? "") || "-"} | scope=${scope?.trim() || "-"}`;
+    const line = `${new Date(clock.now()).toISOString()} | q=${q.replace(/\r?\n/g, " ")} | cwd=${path.basename(cwd ?? "") || "-"} | scope=${scope?.trim() || "-"}`;
     withFileLockSync(MISS_FILE, () => {
       let lines: string[] = [];
       try {
@@ -2372,7 +2518,6 @@ function searchSummary(q: string, cwd?: string): string {
 }
 
 // ---------- 归档层检索：只读外挂 qmd（BM25），不索引 living 热数据、不碰存储 ----------
-const QMD_BIN = process.env.LIVING_MEMORY_QMD ?? "qmd";
 /**
  * 在 qmd 的既有快照索引里检索归档细节（原 pi-memory daily / MEMORY / SCRATCHPAD 全文）。
  * 纯只读：不调 update/embed，索引停留在 2026-11-15 快照；qmd 未装或报错时返回人话而不是抛异常。
@@ -2380,9 +2525,9 @@ const QMD_BIN = process.env.LIVING_MEMORY_QMD ?? "qmd";
 function searchArchive(q: string, limit: number): string {
   const n = Math.max(1, Math.min(25, limit || 5));
   if (!q) return "归档检索需要 query（走 qmd BM25，只覆盖 2026-11-15 快照索引：原 MEMORY/SCRATCHPAD/daily）。\n例：living_memory source=archive query=\"并发 重复扣款\"";
-  const res = spawnSync(QMD_BIN, ["search", q, "--limit", String(n), "--json"], {
+  const res = spawnSync(cfg.qmdBin, ["search", q, "--limit", String(n), "--json"], {
     encoding: "utf8",
-    timeout: Number(process.env.LIVING_MEMORY_QMD_TIMEOUT_MS ?? 30_000),
+    timeout: refreshConfig().qmdTimeoutMs,
     killSignal: "SIGKILL",
   });
   if (res.error || res.status !== 0) {
@@ -2576,7 +2721,7 @@ function recallFor(query: string, cwd?: string, excludeIds?: Set<string>): Array
   const q = String(query ?? "").trim().slice(0, 200);
   const qToks = tokensOf(q);
   if (!q || !qToks.length) return [];
-  const configured = Number(process.env.LIVING_MEMORY_RECALL_MAX_ROWS ?? 20000);
+  const configured = refreshConfig().recallMaxRows;
   const maxRows = Number.isFinite(configured) && configured > 0 ? Math.floor(configured) : 20000;
   // 语料口径 = 状态/scope 合格的全部条目；excludeIds（简报已展示）只影响输出，不参与 df/N 统计，
   // 否则简报抽走几十条会把 df 压到 1，idf 虚高到 3.9，单命中例外就会放行通用词
@@ -2641,7 +2786,7 @@ function recallFor(query: string, cwd?: string, excludeIds?: Set<string>): Array
 
 /** 简报尾部召回段：固定格式、最多 3 条、整段 ≤300 字符 */
 function recallLine(query: string | undefined, cwd: string | undefined, excludeIds: Set<string>): string {
-  if (process.env.LIVING_MEMORY_RECALL === "0" || !query) return "";
+  if (!refreshConfig().recallEnabled || !query) return "";
   const hits = recallFor(query, cwd, excludeIds);
   if (!hits.length) return "";
   const items = hits.map((h) => `[${h.subject.slice(0, 80)}](${h.id.slice(0, 8)})`);
@@ -2690,7 +2835,7 @@ function buildBrief(cwd?: string, query?: string): string {
         continue;
       }
       const text = briefLine(t.tag || (isNegation(e) ? "[雷区] " : ""), e);
-      if (used + text.length + 1 > BRIEF_MAX_CHARS) {
+      if (used + text.length + 1 > cfg.briefMaxChars) {
         dropped++;
         continue;
       }
@@ -2703,10 +2848,10 @@ function buildBrief(cwd?: string, query?: string): string {
   if (!lines.length) return "";
   const openTodos = todoStore.index().open.length;
   // 当前项目节的未完成待办摘 2 条（内容不塞进 entries，只做行内提醒）
-  if (base && used + TODO_DIGEST_RESERVE <= BRIEF_MAX_CHARS) {
+  if (base && used + TODO_DIGEST_RESERVE <= cfg.briefMaxChars) {
     for (const t of todoDigest(base, 2)) {
       const line = `待办·${t.section}：${t.text}`;
-      if (used + line.length + 1 > BRIEF_MAX_CHARS) break;
+      if (used + line.length + 1 > cfg.briefMaxChars) break;
       lines.push(line);
       used += line.length + 1;
     }
@@ -2719,20 +2864,20 @@ function buildBrief(cwd?: string, query?: string): string {
     const line = `待办到期：${show
       .map((r) => `${dueState(r.due) === "overdue" ? `逾期(${r.due})` : r.due} ${r.text.slice(0, 22)}`)
       .join(" · ")}${dueTodo.length > 3 ? ` …（共 ${dueTodo.length} 项）` : ""}`;
-    if (used + line.length + 1 <= BRIEF_MAX_CHARS) {
+    if (used + line.length + 1 <= cfg.briefMaxChars) {
       lines.push(line);
       used += line.length + 1;
     }
   }
   // 最近 14 天的变更（本项目或全局，按 obtained_at 倒序，最多 3 条）
-  const since = new Date(Date.now() - 14 * 86400e3).toISOString();
+  const since = new Date(clock.now() - 14 * 86400e3).toISOString();
   const recent = [...proj, ...glob]
     .filter((e) => String(e.meta.obtained_at) >= since)
     .sort((a, b) => String(b.meta.obtained_at).localeCompare(String(a.meta.obtained_at)))
     .slice(0, 3);
   if (recent.length) {
     const line = `近期：${recent.map((e) => `${e.meta.obtained_at.slice(5, 10)} ${e.meta.kind}/${e.meta.subject.slice(0, 16)}`).join(" · ")}`;
-    if (used + line.length + 1 <= BRIEF_MAX_CHARS) {
+    if (used + line.length + 1 <= cfg.briefMaxChars) {
       lines.push(line);
       used += line.length + 1;
     }
@@ -2743,7 +2888,7 @@ function buildBrief(cwd?: string, query?: string): string {
     const digest = profileDigest();
     if (digest) {
       const line = `· 画像：${digest}`;
-      if (used + line.length + 1 <= BRIEF_MAX_CHARS + 220) {
+      if (used + line.length + 1 <= cfg.briefMaxChars + 220) {
         lines.push(line);
         used += line.length + 1;
       }
@@ -2752,7 +2897,7 @@ function buildBrief(cwd?: string, query?: string): string {
 
   // 召回段必须排在所有分档/待办/画像之后；预算不够时先砍它，不挤占既有档位
   const recall = recallLine(query, cwd, usedIds);
-  if (recall && used + recall.length + 1 <= BRIEF_MAX_CHARS) {
+  if (recall && used + recall.length + 1 <= cfg.briefMaxChars) {
     lines.push(recall);
     used += recall.length + 1;
   }
@@ -2782,13 +2927,17 @@ function currentUserPrompt(event: any, ctx: any): string {
 }
 
 // ---------- Phase 3：自动抽取 ----------
-function dbg(s: string) {
-  if (process.env.LIVING_MEMORY_DEBUG === "1") {
-    try {
-      fs.appendFileSync("/tmp/living-memory-debug.log", `[${new Date().toISOString()}] ${s}\n`);
-    } catch {
-      /* 调试失败无害 */
-    }
+/** @deprecated 策略层请用 logger.debug(msg)；旧名保留为薄包装 */
+function dbg(s: string): void {
+  logger.debug(s);
+}
+/** logger.debug 的默认实现：仅 LIVING_MEMORY_DEBUG=1 时落盘（现状没有控制台输出，这里也不新增） */
+function appendDebugLog(s: string): void {
+  if (!refreshConfig().debug) return;
+  try {
+    fs.appendFileSync("/tmp/living-memory-debug.log", `[${new Date(clock.now()).toISOString()}] ${s}\n`);
+  } catch {
+    /* 调试失败无害 */
   }
 }
 function textOf(m: any): string {
@@ -2810,11 +2959,11 @@ function conversationText(msgs: any[]): string {
 }
 
 function extractEnabled(): boolean {
-  return process.env.LIVING_MEMORY_EXTRACT !== "0";
+  return refreshConfig().extractEnabled;
 }
 
 function resolveExtractModel(ctx: any): any | null {
-  const spec = (process.env.LIVING_MEMORY_EXTRACT_MODEL ?? "").trim();
+  const spec = refreshConfig().extractModel;
   if (!spec) return ctx?.model ?? null;
   const slash = spec.indexOf("/");
   const reg = ctx?.modelRegistry as any;
@@ -2850,10 +2999,10 @@ let lastRunMessages: any[] | null = null;
 function scheduleExtraction(msgs: any[], ctx: any, reason: string) {
   if (extractionInFlight) return;
   const text = conversationText(msgs);
-  dbg(`scheduleExtraction (${reason}): text=${text.length}ch`);
+  logger.debug(`scheduleExtraction (${reason}): text=${text.length}ch`);
   if (!text) return;
   extractionInFlight = true;
-  const timeoutMs = Number(process.env.LIVING_MEMORY_EXTRACT_TIMEOUT_MS ?? 20000);
+  const timeoutMs = refreshConfig().extractTimeoutMs;
   pendingExtraction = (async () => {
     const expired = new Promise<null>((r) => setTimeout(() => r(null), timeoutMs));
     await Promise.race([runExtraction(text, ctx, reason), expired]);
@@ -2870,9 +3019,9 @@ async function runExtraction(text: string, ctx: any, reason: string): Promise<vo
     const model = resolveExtractModel(ctx);
     if (!model) return;
     const apiKey = await resolveApiKey(ctx, model);
-    dbg(`runExtraction ${reason}: model=${model?.provider ?? "?"}/${model?.id ?? "?"} apiKey=${apiKey ? "yes" : "no"}`);
+    logger.debug(`runExtraction ${reason}: model=${model?.provider ?? "?"}/${model?.id ?? "?"} apiKey=${apiKey ? "yes" : "no"}`);
     if (!apiKey) {
-      logActivity(`auto-extract skipped: no api key (${reason})`);
+      logger.activity(`auto-extract skipped: no api key (${reason})`);
       return;
     }
     const existing = brief()
@@ -2883,7 +3032,7 @@ async function runExtraction(text: string, ctx: any, reason: string): Promise<vo
       model,
       {
         systemPrompt: extractionSystemPrompt(existing),
-        messages: [{ role: "user", content: [{ type: "text", text }], timestamp: Date.now() }],
+        messages: [{ role: "user", content: [{ type: "text", text }], timestamp: clock.now() }],
       },
       { apiKey, reasoningEffort: "low" },
     );
@@ -2892,7 +3041,7 @@ async function runExtraction(text: string, ctx: any, reason: string): Promise<vo
       .map((b: any) => b.text)
       .join("\n")
       .trim();
-    dbg(`extraction raw out: ${JSON.stringify(out).slice(0, 300)}`);
+    logger.debug(`extraction raw out: ${JSON.stringify(out).slice(0, 300)}`);
     if (!out) {
       noteExtractFailure("empty-response", `model=${model.id} 回包无文本（${reason}）`);
       return;
@@ -2909,7 +3058,7 @@ async function runExtraction(text: string, ctx: any, reason: string): Promise<vo
     let items: any;
     try {
       items = JSON.parse(raw.slice(l, r + 1));
-      dbg(`parsed ${Array.isArray(items) ? items.length : "non-array"} items`);
+      logger.debug(`parsed ${Array.isArray(items) ? items.length : "non-array"} items`);
     } catch {
       noteExtractFailure("parse-failed", `JSON 解析失败：${raw.slice(l, l + 120)}（${reason}）`);
       return;
@@ -2923,14 +3072,14 @@ async function runExtraction(text: string, ctx: any, reason: string): Promise<vo
       if (!(KINDS as readonly string[]).includes(kind) || !subject || !body) continue;
       // 自指过滤：讲插件自身实现/参数的候选不立条目（归 summary），避免「开发过程」污染个人记忆层
       if (isPluginInternal(subject)) {
-        logActivity(`auto-extract skipped self-ref kind=${kind} subject=${subject} (${reason})`);
+        logger.activity(`auto-extract skipped self-ref kind=${kind} subject=${subject} (${reason})`);
         continue;
       }
       const dup = entryStore.findConflicting(kind, subject, body);
       if (dup) {
         // 同一推断再次被抽取到：算一次复现证据（不新建条目，不改 confidence）
         if (dup.meta.status === "inference")
-          appendEvidence(dup, { at: new Date().toISOString(), kind: "repeat", id: `extract-${reason}`, note: "抽取器再次命中同一事实" });
+          appendEvidence(dup, { at: new Date(clock.now()).toISOString(), kind: "repeat", id: `extract-${reason}`, note: "抽取器再次命中同一事实" });
         continue;
       }
       const autoFact = autoFactable(kind, conf, "advice-only");
@@ -2942,22 +3091,22 @@ async function runExtraction(text: string, ctx: any, reason: string): Promise<vo
         subject,
         scope: "global",
         source: `auto-extract ${today()}（${reason} 模型抽取，${autoFact ? "高置信度自动按事实" : "待用户确认"}）`,
-        obtained_at: new Date().toISOString(),
-        confirmed_at: autoFact ? new Date().toISOString() : "",
+        obtained_at: new Date(clock.now()).toISOString(),
+        confirmed_at: autoFact ? new Date(clock.now()).toISOString() : "",
         expires_at: "",
-        review_after: new Date(Date.now() + 14 * 86400e3).toISOString().slice(0, 10),
+        review_after: new Date(clock.now() + 14 * 86400e3).toISOString().slice(0, 10),
         confidence: String(Math.min(Math.max(conf, 0), 1)),
         action_impact: "advice-only",
         supersedes: "",
         superseded_by: "",
       };
       entryStore.put({ meta, body });
-      logActivity(
+      logger.activity(
         `auto-extract created ${id} kind=${kind} status=${meta.status}${autoFact ? ` auto-fact conf=${meta.confidence}` : ""} subject=${subject} (${reason})`,
       );
       n++;
     }
-    dbg(`candidates written: ${n}`);
+    logger.debug(`candidates written: ${n}`);
     if (n > 0) {
       if (ctx?.hasUI) {
         try {
@@ -2980,7 +3129,7 @@ async function runExtraction(text: string, ctx: any, reason: string): Promise<vo
       refreshWidget(ctx);
     }
   } catch (err) {
-    dbg(`runExtraction threw: ${err instanceof Error ? err.message : String(err)}`);
+    logger.debug(`runExtraction threw: ${err instanceof Error ? err.message : String(err)}`);
     noteExtractFailure("request-failed", err instanceof Error ? err.message : String(err));
   }
 }
@@ -3030,7 +3179,7 @@ export default function (pi: ExtensionAPI) {
         // 推断条目被再次提及：记证据而不是新建（第二步）；显式陈述算最强证据 restate
         if (dup.meta.status === "inference" && (p.basis === "inference" || p.basis === "explicit")) {
           const note = appendEvidence(dup, {
-            at: new Date().toISOString(),
+            at: new Date(clock.now()).toISOString(),
             kind: p.basis === "explicit" ? "restate" : "repeat",
             id: (p.source ?? "").slice(0, 40) || "remember",
             note: p.basis === "explicit" ? "用户原话重述" : "同一事实再次出现",
@@ -3076,8 +3225,8 @@ export default function (pi: ExtensionAPI) {
         subject: p.subject,
         scope: (p.scope || "global").trim(),
         source: p.source,
-        obtained_at: new Date().toISOString(),
-        confirmed_at: autoFact || p.basis === "explicit" ? new Date().toISOString() : "",
+        obtained_at: new Date(clock.now()).toISOString(),
+        confirmed_at: autoFact || p.basis === "explicit" ? new Date(clock.now()).toISOString() : "",
         expires_at: p.expires_at || "",
         review_after: p.review_after || defaultReviewAfter(p.basis, p.kind),
         confidence: p.basis === "inference" ? String(p.confidence) : "",
@@ -3086,7 +3235,7 @@ export default function (pi: ExtensionAPI) {
         superseded_by: "",
       };
       entryStore.put({ meta, body: p.text });
-      logActivity(
+      logger.activity(
         autoFact
           ? `created ${id} kind=${p.kind} status=confirmed auto-fact conf=${p.confidence} subject=${p.subject}`
           : `created ${id} kind=${p.kind} status=${p.basis} subject=${p.subject}`,
@@ -3267,7 +3416,7 @@ export default function (pi: ExtensionAPI) {
           content: [
             {
               type: "text",
-              text: rotateRecovery(Number.isFinite(days) ? days : RECOVERY_RETAIN_DAYS, p.dry_run !== false),
+              text: rotateRecovery(Number.isFinite(days) ? days : cfg.recoveryRetainDays, p.dry_run !== false),
             },
           ],
         };
@@ -3279,7 +3428,7 @@ export default function (pi: ExtensionAPI) {
             {
               type: "text",
               text: withFileLockSync(SUMMARY_FILE, () =>
-                opSummaryArchive(Number.isFinite(keep) && keep > 0 ? keep : SUMMARY_KEEP, p.dry_run !== false),
+                opSummaryArchive(Number.isFinite(keep) && keep > 0 ? keep : cfg.summaryKeep, p.dry_run !== false),
               ),
             },
           ],
@@ -3379,11 +3528,11 @@ function profileBlock(): string {
   const scopes = new Map<string, number>();
   for (const e of act) for (const s of e.meta.scope.split(",").map((x) => x.trim()).filter(Boolean)) scopes.set(s, (scopes.get(s) ?? 0) + 1);
   const dates = act.map((e) => e.meta.obtained_at.slice(0, 10)).filter(Boolean).sort();
-  const age = dates.length ? Math.round((Date.now() - new Date(`${dates[0]}T00:00:00Z`).getTime()) / 86_400_000) : 0;
+  const age = dates.length ? Math.round((clock.now() - new Date(`${dates[0]}T00:00:00Z`).getTime()) / 86_400_000) : 0;
   const multi = act.filter((e) => e.meta.scope.includes(",")).length;
   const proj = act.filter((e) => /project:|workspace:/.test(e.meta.scope)).length;
   const superseded = all.filter((e) => e.meta.status === "superseded").length;
-  const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
+  const stamp = new Date(clock.now()).toISOString().slice(0, 16).replace("T", " ");
   return [
     `| 指标 | 值 |`,
     `|---|---|`,
@@ -3411,7 +3560,7 @@ function refreshProfile(dry = true): string {
     : `${old}${old.endsWith("\n") ? "" : "\n"}\n${wrapped}\n`;
   if (next === old) return `profile.md 统计块已是最新（活动 ${entryStore.list().filter((e) => ACTIVE.has(e.meta.status)).length} 条），未写盘。`;
   writeAtomic(PROFILE_FILE, next);
-  logActivity("profile rebuild");
+  logger.activity("profile rebuild");
   return `已刷新 ${PROFILE_FILE}（活动 ${entryStore.list().filter((e) => ACTIVE.has(e.meta.status)).length} 条）`;
 }
 
@@ -3426,14 +3575,14 @@ function refreshProfile(dry = true): string {
       const arg = (args || "").trim();
       if (arg === "off") {
         ensureDirs();
-        fs.writeFileSync(PAUSE_FLAG, `${new Date().toISOString()}\n`);
-        logActivity("pause on");
+        fs.writeFileSync(PAUSE_FLAG, `${new Date(clock.now()).toISOString()}\n`);
+        logger.activity("pause on");
         ctx.ui.notify("living memory 写入已暂停（remember 将拒写）", "info");
         return;
       }
       if (arg === "on") {
         if (fs.existsSync(PAUSE_FLAG)) fs.unlinkSync(PAUSE_FLAG);
-        logActivity("pause off");
+        logger.activity("pause off");
         ctx.ui.notify("living memory 写入已恢复", "info");
         return;
       }
@@ -3676,10 +3825,10 @@ function refreshProfile(dry = true): string {
       if (autoFacts.length)
         ctx.ui.notify(`living memory 自动按事实处理 ${autoFacts.length} 条：${autoFacts.join("；")}`, "info");
       // recovery/ 保留期轮转：只在有到期文件时才动，静默执行并记审计
-      const rotated = rotateRecovery(RECOVERY_RETAIN_DAYS, false);
+      const rotated = rotateRecovery(cfg.recoveryRetainDays, false);
       if (rotated.startsWith("已物理删除")) ctx.ui.notify(`living memory ${rotated}`, "info");
       // 项 5：只提示不自动搬（过期条目可归档 / summary 小节超阈值），避免每次启动都动文件
-      if (process.env.LIVING_MEMORY_START_HINTS !== "0") {
+      if (refreshConfig().startHints) {
         const hints: string[] = [];
         const twins = legacyTwins();
         if (twins) hints.push(`发现大写孪生文件 ${twins}（陈旧实例可能又写回来了）：/reload 后人工合并，否则写入会分叉`);
@@ -3702,17 +3851,17 @@ function refreshProfile(dry = true): string {
           hints.push(`抽取 24h 内失败 ${fail24.length} 次（${why}）：source=extract 看原因与原文片段`);
         }
         const secs = summaryStore.index().length;
-        if (secs > SUMMARY_KEEP) {
-          const autoKeep = Number(process.env.LIVING_MEMORY_AUTO_ARCHIVE_KEEP ?? 120);
-          if (process.env.LIVING_MEMORY_AUTO_ARCHIVE === "1" && secs > autoKeep) {
+        if (secs > cfg.summaryKeep) {
+          const autoKeep = refreshConfig().autoArchiveKeep;
+          if (refreshConfig().autoArchive && secs > autoKeep) {
             const r = opSummaryArchive(autoKeep, false);
             ctx.ui.notify(`living memory 自动归档（节数 ${secs} > ${autoKeep}）：${r}`, "info");
-          } else hints.push(`summary ${secs} 节 > ${SUMMARY_KEEP}（action=summary_archive 预览）`);
+          } else hints.push(`summary ${secs} 节 > ${cfg.summaryKeep}（action=summary_archive 预览）`);
         }
         if (hints.length) ctx.ui.notify(`living memory ${hints.join(" · ")}`, "info");
       }
       // 画像统计块：机械计数，幂等（无变化不写盘），静默刷新（与提示开关无关）
-      if (process.env.LIVING_MEMORY_PROFILE_AUTO !== "0") {
+      if (refreshConfig().profileAuto) {
         try {
           refreshProfile(false);
         } catch {
@@ -3728,7 +3877,7 @@ function refreshProfile(dry = true): string {
   // Phase 2：before_agent_start 简报注入（每 run 从库重算，压缩后自动重注入）
   pi.on("before_agent_start", async (event: any, ctx: any) => {
     try {
-      if (process.env.LIVING_MEMORY_BRIEF === "0") return;
+      if (!refreshConfig().briefEnabled) return;
       const block = buildBrief(ctx?.cwd, currentUserPrompt(event, ctx));
       if (!block) return;
       return { systemPrompt: event.systemPrompt + block };
@@ -3739,14 +3888,14 @@ function refreshProfile(dry = true): string {
 
   // Phase 3：agent_end 暂存本 run 消息 → agent_settled 触发抽取（fire-and-forget）
   pi.on("agent_end", async (event: any) => {
-    dbg(`agent_end: ${(event?.messages ?? []).length} msgs`);
+    logger.debug(`agent_end: ${(event?.messages ?? []).length} msgs`);
     lastRunMessages = event?.messages ?? null;
   });
 
   pi.on("agent_settled", async (event: any, ctx: any) => {
     const msgs = lastRunMessages;
     lastRunMessages = null;
-    dbg(`agent_settled: aborted=${!!event?.aborted} msgs=${msgs?.length ?? 0} enabled=${extractEnabled()} paused=${isPaused()}`);
+    logger.debug(`agent_settled: aborted=${!!event?.aborted} msgs=${msgs?.length ?? 0} enabled=${extractEnabled()} paused=${isPaused()}`);
     if (!msgs || event?.aborted || !extractEnabled() || isPaused()) return;
     scheduleExtraction(msgs, ctx, "agent_settled");
   });
@@ -3777,3 +3926,6 @@ function refreshProfile(dry = true): string {
     }
   });
 }
+
+// 注入点对测试/宿主开放：默认实现与线上完全一致，只有显式注入才偏离（对外行为不变）
+export { setConfig, setClock, setLogger };
