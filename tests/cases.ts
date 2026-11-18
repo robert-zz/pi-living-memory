@@ -38,7 +38,7 @@ export const CASES: Meta[] = [
   { id: "auto-fact", title: "推断：置信度 ≥0.85 自动按事实，低于降为弱参考", seed: "basic" },
   { id: "auto-fact-retro", title: "推断：A 会话启动按已存 confidence 追溯转事实", seed: "basic" },
   { id: "auto-fact-evidence", title: "推断：B 证据 ≥3 天且分 ≥0.8 自动转事实", seed: "basic" },
-  { id: "index-toks", title: "索引：v=3 + toks，旧版索引重建", seed: "basic" },
+  { id: "index-toks", title: "索引：v=4 + toks，旧版索引重建", seed: "basic" },
   { id: "recall-rank", title: "召回：中文模糊说法命中并按 BM25 排序", seed: "basic" },
   { id: "recall-limits", title: "召回：≤3 条 / 每条 subject ≤80 / 整段 ≤300", seed: "basic" },
   { id: "recall-dedup", title: "召回：排除简报已含条目", seed: "basic" },

@@ -299,6 +299,30 @@ interface EntryStore {
   put(e: Entry): void;
   /** 删除条目：落 recovery 记录、移走 entries/ 或 expired/ 下的文件、同步索引行 */
   delete(e: Entry, note?: string): void;
+  /**
+   * entries → expired：写 status=expired（frontmatter 其余字段保留）后把文件搬进 expired/ 并从索引移除，
+   * 返回是否真的搬了文件（盘上没有活动文件时为 false，调用方的文案靠它）。activity.log 由策略层写。
+   */
+  expire(e: Entry): boolean;
+  /**
+   * expired → entries：按 id 搬回（保留原 id 与正文）并把 status 换成新值、写入 extraMeta 里的 frontmatter 字段，
+   * 索引行随之恢复；盘上没有任何副本时返回 false，由调用方按「新建条目」写回。
+   */
+  resurrect(id: string, status: string, extraMeta?: Record<string, string>): boolean;
+  /**
+   * 从 expired/（文件）或 recovery/（删除记录）取回，返回取回后的条目；
+   * 条目仍在 entries/ 时幂等跳过（recovery 记录保留），找不到可恢复的东西返回 null。
+   */
+  restore(id: string, opts?: { from?: "expired" | "recovery" }): Entry | null;
+  /** recovery/ 里可恢复的 id（给前缀时按 restore 的匹配口径过滤）；recovery/ 目录不存在时为 null */
+  recoverableIds(idPrefix?: string): string[] | null;
+  /** expired/ 归档区全量条目（含正文，归档区检索用）；目录不存在时为 null */
+  listExpired(): Entry[] | null;
+  /**
+   * purge 语义：把 status=expired/superseded 且超过 olderDays 的条目搬进 expired/ 并写月度台账（dropIndexRows 一次）。
+   * 返回候选行（只含元数据，不读正文）、实际搬动条数、库内失效条目总数；dryRun=true 只算不动。
+   */
+  purgeExpired(olderDays: number, dryRun: boolean): { candidates: EntryIndex[]; moved: number; closed: number };
   /** 同 kind+subject 的活动条目里正文相似的那条（先索引筛候选，再只读候选正文） */
   findConflicting(kind: string, subject: string, text: string): Entry | null;
   /** 强制从盘重建派生索引并落盘（格式版本不符/损坏时 list 会自动调用） */
@@ -385,6 +409,78 @@ class FileEntryStore implements EntryStore {
     dropIndexRows([e.meta.id]);
   }
 
+  expire(e: Entry): boolean {
+    e.meta.status = "expired";
+    this.put({ meta: e.meta, body: e.body });
+    // 与旧 moveToExpired 同序：先写 status，再搬文件，最后删索引行（文件不在时不动索引）
+    const moved = this.moveFileToExpired(e.meta.id);
+    if (moved) dropIndexRows([e.meta.id]);
+    return moved;
+  }
+
+  resurrect(id: string, status: string, extraMeta?: Record<string, string>): boolean {
+    const cold = path.join(EXPIRED_DIR, `${id}.md`);
+    const live = entryPath(id);
+    const src = fs.existsSync(cold) ? cold : fs.existsSync(live) ? live : null;
+    if (!src) return false;
+    const e = parseEntry(src);
+    if (!e) return false;
+    // 搬回 entries/：rename 保留原文，随后 put 按 live 路径改写 status 并恢复索引行
+    if (src === cold && !fs.existsSync(live)) fs.renameSync(cold, live);
+    e.meta.status = status;
+    for (const [k, v] of Object.entries(extraMeta ?? {})) e.meta[k] = v;
+    this.put({ meta: e.meta, body: e.body });
+    return true;
+  }
+
+  restore(id: string, opts?: { from?: "expired" | "recovery" }): Entry | null {
+    const from = opts?.from;
+    if (!from || from === "expired") {
+      const e = this.restoreFromExpired(id);
+      if (e) return e;
+      if (from === "expired") return null;
+    }
+    return this.restoreFromRecovery(id);
+  }
+
+  recoverableIds(idPrefix?: string): string[] | null {
+    if (!fs.existsSync(RECOVERY_DIR)) return null;
+    const files = fs.readdirSync(RECOVERY_DIR).filter((f) => f.endsWith(".json"));
+    if (idPrefix) {
+      const hit = files.find((x) => x === `${idPrefix}.json`) ?? files.find((x) => x.startsWith(idPrefix));
+      return hit ? [hit.replace(/\.json$/, "")] : [];
+    }
+    return files.map((x) => x.replace(/\.json$/, ""));
+  }
+
+  listExpired(): Entry[] | null {
+    if (!fs.existsSync(EXPIRED_DIR)) return null;
+    const out: Entry[] = [];
+    for (const f of fs.readdirSync(EXPIRED_DIR)) {
+      if (!f.endsWith(".md") || f.startsWith("index-")) continue;
+      const e = parseEntry(path.join(EXPIRED_DIR, f));
+      if (e?.meta.id) out.push(e);
+    }
+    return out;
+  }
+
+  purgeExpired(olderDays: number, dryRun: boolean): { candidates: EntryIndex[]; moved: number; closed: number } {
+    ensureDirs();
+    const { closed, due } = this.purgeCandidates(olderDays);
+    if (dryRun || !due.length) return { candidates: due, moved: 0, closed };
+    fs.mkdirSync(EXPIRED_DIR, { recursive: true });
+    const month = new Date().toISOString().slice(0, 7);
+    const idx = path.join(EXPIRED_DIR, `index-${month}.md`);
+    const head = fs.existsSync(idx) ? "" : `# expired 归档索引 ${month}\n\n| id | kind | status | 记录日 | subject |\n|---|---|---|---|---|\n`;
+    const rows = due.map((e) => {
+      this.moveFileToExpired(e.meta.id); // 已在 expired/ 的只登记月度索引
+      return `| ${e.meta.id} | ${e.meta.kind} | ${e.meta.status} | ${e.meta.obtained_at.slice(0, 10)} | ${e.meta.subject.replace(/\|/g, "／")} |`;
+    });
+    fs.writeFileSync(idx, head + rows.join("\n") + "\n");
+    dropIndexRows(due.map((e) => e.meta.id));
+    return { candidates: due, moved: due.length, closed };
+  }
+
   findConflicting(kind: string, subject: string, text: string): Entry | null {
     const want = normText(subject);
     const cands = this.list().filter(
@@ -403,6 +499,57 @@ class FileEntryStore implements EntryStore {
 
   stamp(): string {
     return dirStamp();
+  }
+
+  /** 从 entries/ 搬进 expired/（只动文件，索引由调用方按旧时机维护）：返回是否真的搬了 */
+  private moveFileToExpired(id: string): boolean {
+    const src = entryPath(id);
+    if (!fs.existsSync(src)) return false;
+    fs.mkdirSync(EXPIRED_DIR, { recursive: true });
+    fs.renameSync(src, path.join(EXPIRED_DIR, `${id}.md`));
+    return true;
+  }
+
+  /** restore 的 expired/ 分支：归档区文件本身完好，原样搬回 entries/（不动索引，旧实现也不动） */
+  private restoreFromExpired(idPrefix: string): Entry | null {
+    if (!fs.existsSync(EXPIRED_DIR)) return null;
+    const hit = fs
+      .readdirSync(EXPIRED_DIR)
+      .filter((f) => f.endsWith(".md") && !f.startsWith("index-") && (f === `${idPrefix}.md` || f.startsWith(idPrefix)))[0];
+    if (!hit) return null;
+    const id = hit.replace(/\.md$/, "");
+    fs.renameSync(path.join(EXPIRED_DIR, hit), entryPath(id));
+    // 归档区文件损坏时 parseEntry 回 null，但文件已搬回：仍按「已恢复」返回占位条目（旧实现只看文件名）
+    return parseEntry(entryPath(id)) ?? { meta: { id }, body: "" };
+  }
+
+  /** restore 的 recovery/ 分支：条目仍在 entries/ 时幂等跳过（记录保留），返回 null */
+  private restoreFromRecovery(idPrefix: string): Entry | null {
+    if (!fs.existsSync(RECOVERY_DIR)) return null;
+    const files = fs.readdirSync(RECOVERY_DIR).filter((f) => f.endsWith(".json"));
+    const f = files.find((x) => x === `${idPrefix}.json`) ?? files.find((x) => x.startsWith(idPrefix));
+    if (!f) return null;
+    const rec = JSON.parse(fs.readFileSync(path.join(RECOVERY_DIR, f), "utf8")) as Entry;
+    const id = rec.meta.id;
+    if (fs.existsSync(entryPath(id))) return null;
+    this.put({ meta: rec.meta, body: rec.body });
+    fs.unlinkSync(path.join(RECOVERY_DIR, f));
+    return rec;
+  }
+
+  /** 待归档（purge_expired）候选：只看元数据——entries/ 里的失效条目走索引，已搬走的 expired/ 直接读文件 */
+  private purgeCandidates(olderDays: number): { closed: number; due: EntryIndex[] } {
+    const fromIndex = this.list().filter((e) => e.meta.status === "expired" || e.meta.status === "superseded");
+    const fromExpired: EntryIndex[] = fs.existsSync(EXPIRED_DIR)
+      ? fs
+          .readdirSync(EXPIRED_DIR)
+          .filter((f) => f.endsWith(".md") && !f.startsWith("index-"))
+          .map((f) => parseEntry(path.join(EXPIRED_DIR, f)))
+          .filter((e): e is Entry => !!e)
+          .map((e) => toIndexRow(e.meta, titleOf(e.body)))
+      : [];
+    const all = fromIndex.concat(fromExpired);
+    return { closed: all.length, due: all.filter((e) => ageDays(e.meta) >= olderDays) };
   }
 
   /** 从 entries/ 重建索引行并落盘；stamp 由调用方先取，缓存戳与触发重建的那次读盘一致 */
@@ -472,17 +619,6 @@ const invalidateIndex = () => {
 /** @deprecated 内部请用 entryStore.put({ meta, body }) */
 function writeEntry(meta: Meta, body: string) {
   entryStore.put({ meta, body });
-}
-
-/** 失效条目搬进 expired/：离开 entries/ 并同步从索引移除（不删除，restore 可取回） */
-function moveToExpired(id: string): boolean {
-  const src = entryPath(id);
-  const dest = path.join(EXPIRED_DIR, `${id}.md`);
-  if (!fs.existsSync(src)) return false;
-  fs.mkdirSync(EXPIRED_DIR, { recursive: true });
-  fs.renameSync(src, dest);
-  dropIndexRows([id]);
-  return true;
 }
 
 function parseEntry(file: string): Entry | null {
@@ -816,15 +952,17 @@ function opRenew(e: Entry, reviewAfter?: string, expiresAt?: string): string {
   const resurrect = e.meta.status === "expired";
   if (!resurrect && !ACTIVE.has(e.meta.status)) return `${e.meta.id} status=${e.meta.status}，非活动条目，不能续期。`;
   const ra = reviewAfter || new Date(Date.now() + 30 * 86400e3).toISOString().slice(0, 10);
+  const patch: Meta = { review_after: ra };
+  if (expiresAt) patch.expires_at = expiresAt;
   if (resurrect) {
-    const cold = path.join(EXPIRED_DIR, `${e.meta.id}.md`);
-    if (fs.existsSync(cold) && !fs.existsSync(entryPath(e.meta.id))) fs.renameSync(cold, entryPath(e.meta.id));
-    e.meta.status = "explicit";
-    e.meta.confirmed_at = "";
+    const reviveFields: Meta = { confirmed_at: "", ...patch };
+    Object.assign(e.meta, { status: "explicit", ...reviveFields });
+    // 复活由 store 搬文件 + 恢复索引行；盘上没有任何副本（并发删除）时退回按内存内容写回，语义同旧实现
+    if (!entryStore.resurrect(e.meta.id, "explicit", reviveFields)) entryStore.put({ meta: e.meta, body: e.body });
+  } else {
+    Object.assign(e.meta, patch);
+    entryStore.put({ meta: e.meta, body: e.body });
   }
-  e.meta.review_after = ra;
-  if (expiresAt) e.meta.expires_at = expiresAt;
-  entryStore.put({ meta: e.meta, body: e.body });
   logActivity(`renew ${e.meta.id} review_after=${ra} status=${e.meta.status}${resurrect ? " resurrect=1" : ""}`);
   return resurrect
     ? `${e.meta.id} 已复活（expired → explicit，搬回 entries/），review_after=${ra}。`
@@ -832,9 +970,7 @@ function opRenew(e: Entry, reviewAfter?: string, expiresAt?: string): string {
 }
 
 function opExpire(e: Entry, note?: string): string {
-  e.meta.status = "expired";
-  entryStore.put({ meta: e.meta, body: e.body });
-  const moved = moveToExpired(e.meta.id);
+  const moved = entryStore.expire(e);
   logActivity(`expire ${e.meta.id} moved=${moved ? "expired/" : "-"}${note ? ` note=${note}` : ""}`);
   return `${e.meta.id} 已标记过期${moved ? "并移入 expired/" : ""}（不再参与检索；restore 可取回，补 renew 即复活）。`;
 }
@@ -850,45 +986,16 @@ function ageDays(meta: Meta): number {
   return (Date.now() - t) / 86_400_000;
 }
 
-/** 待归档（purge_expired）候选计数：opPurgeExpired 与开屏提示共用同一口径 */
-function purgeCandidates(olderDays = 30): { closed: number; due: EntryIndex[] } {
-  // 只看元数据：entries/ 里的 legacy 失效条目走索引，已搬走的 expired/ 直接读文件
-  const listIn = (dir: string): Entry[] =>
-    fs.existsSync(dir)
-      ? fs
-          .readdirSync(dir)
-          .filter((f) => f.endsWith(".md") && !f.startsWith("index-"))
-          .map((f) => parseEntry(path.join(dir, f)))
-          .filter((e): e is Entry => !!e)
-      : [];
-  const fromIndex = entryStore.list().filter((e) => e.meta.status === "expired" || e.meta.status === "superseded");
-  const fromExpired = listIn(EXPIRED_DIR).map((e) => toIndexRow(e.meta, titleOf(e.body)));
-  const all = fromIndex.concat(fromExpired);
-  return { closed: all.length, due: all.filter((e) => ageDays(e.meta) >= olderDays) };
-}
-
 /** 把 status=expired/superseded 且超过 older_than_days 的条目移入 expired/；dry_run 默认 true */
 function opPurgeExpired(olderDays = 30, dry = true): string {
-  ensureDirs();
-  const { closed, due } = purgeCandidates(olderDays);
+  const { candidates: due, moved, closed } = entryStore.purgeExpired(olderDays, dry);
   if (!due.length)
     return `无符合条件条目（库内 status=expired/superseded 共 ${closed} 条，均未超过 ${olderDays} 天）。`;
   const lines = due.map((e) => `${e.meta.id}（${e.meta.kind}/${e.meta.status}/${e.meta.obtained_at.slice(0, 10)}）${e.meta.subject}`);
   if (dry)
     return `候选 ${due.length} 条（dry_run，未移动）：\n${lines.slice(0, 15).join("\n")}${due.length > 15 ? `\n…（还有 ${due.length - 15} 条）` : ""}\n确认无误会后传 dry_run=false 执行：文件移到 expired/，仍可用 restore 取回。`;
-  fs.mkdirSync(EXPIRED_DIR, { recursive: true });
-  const month = new Date().toISOString().slice(0, 7);
-  const idx = path.join(EXPIRED_DIR, `index-${month}.md`);
-  const head = fs.existsSync(idx) ? "" : `# expired 归档索引 ${month}\n\n| id | kind | status | 记录日 | subject |\n|---|---|---|---|---|\n`;
-  const rows = due.map((e) => {
-    const src = entryPath(e.meta.id);
-    if (fs.existsSync(src)) fs.renameSync(src, path.join(EXPIRED_DIR, `${e.meta.id}.md`)); // 已在 expired/ 的只登记月度索引
-    return `| ${e.meta.id} | ${e.meta.kind} | ${e.meta.status} | ${e.meta.obtained_at.slice(0, 10)} | ${e.meta.subject.replace(/\|/g, "／")} |`;
-  });
-  fs.writeFileSync(idx, head + rows.join("\n") + "\n");
-  dropIndexRows(due.map((e) => e.meta.id));
-  logActivity(`purge_expired n=${due.length} older_than_days=${olderDays} ids=${due.map((e) => e.meta.id).join(",")}`);
-  return `已清理 ${due.length} 条到 expired/（索引 expired/index-${month}.md，restore 可取回）：\n${lines.slice(0, 10).join("\n")}${due.length > 10 ? "\n…" : ""}`;
+  logActivity(`purge_expired n=${moved} older_than_days=${olderDays} ids=${due.map((e) => e.meta.id).join(",")}`);
+  return `已清理 ${moved} 条到 expired/（索引 expired/index-${new Date().toISOString().slice(0, 7)}.md，restore 可取回）：\n${lines.slice(0, 10).join("\n")}${due.length > 10 ? "\n…" : ""}`;
 }
 
 const RECOVERY_RETAIN_DAYS = Number(process.env.LIVING_MEMORY_RECOVERY_DAYS ?? 180);
@@ -916,13 +1023,8 @@ function rotateRecovery(days = RECOVERY_RETAIN_DAYS, dry = true): string {
 
 /** expired/ 归档区检索视图：条目被 purge_expired 移出活动库后仍可查、可取回 */
 function searchExpired(q: string, status?: string, limit = 30): string {
-  if (!fs.existsSync(EXPIRED_DIR)) return "expired/ 为空（尚未执行过 purge_expired）。";
-  const rows: Entry[] = [];
-  for (const f of fs.readdirSync(EXPIRED_DIR)) {
-    if (!f.endsWith(".md") || f.startsWith("index-")) continue;
-    const e = parseEntry(path.join(EXPIRED_DIR, f));
-    if (e?.meta.id) rows.push(e);
-  }
+  const rows = entryStore.listExpired();
+  if (!rows) return "expired/ 为空（尚未执行过 purge_expired）。";
   const kw = q.split(/\s+/).filter(Boolean);
   let list = status ? rows.filter((e) => e.meta.status === status) : rows;
   if (kw.length)
@@ -950,11 +1052,7 @@ function opExpireBatch(sel: { kind?: string; scope?: string; subject?: string },
   const more = pick.length > 15 ? `\n…（还有 ${pick.length - 15} 条）` : "";
   if (dry)
     return `候选 ${pick.length} 条（dry_run，未改动）：\n${lines.slice(0, 15).join("\n")}${more}\n确认后传 dry_run=false；每条都可 renew 复活。`;
-  for (const e of pick) {
-    e.meta.status = "expired";
-    entryStore.put({ meta: e.meta, body: e.body });
-    moveToExpired(e.meta.id);
-  }
+  for (const e of pick) entryStore.expire(e);
   logActivity(`expire-batch n=${pick.length} kind=${sel.kind ?? "-"} scope=${sel.scope ?? "-"} subject=${sel.subject ?? "-"}${note ? ` note=${note}` : ""}`);
   return `已批量失效 ${pick.length} 条（status=expired，renew 可复活）：\n${lines.slice(0, 10).join("\n")}${pick.length > 10 ? "\n…" : ""}`;
 }
@@ -972,33 +1070,26 @@ function opDelete(e: Entry, note?: string): string {
   return `${e.meta.id} 已删除（完整内容存于 recovery/${e.meta.id}.json，可用 living_memory_update action=restore id=${e.meta.id} 恢复）。`;
 }
 
-/** 从 recovery 记录恢复被删除条目（幂等：条目仍在库中则不覆盖） */
+/** 从 expired/ 归档区或 recovery 记录恢复条目（幂等：条目仍在库中则不覆盖） */
 function opRestore(idPrefix: string): string {
   // 先看 expired/（purge_expired 转移过来的条目在这里，文件本身完好）
-  if (fs.existsSync(EXPIRED_DIR)) {
-    const hit = fs
-      .readdirSync(EXPIRED_DIR)
-      .filter((f) => f.endsWith(".md") && !f.startsWith("index-") && (f === `${idPrefix}.md` || f.startsWith(idPrefix)))[0];
-    if (hit) {
-      fs.renameSync(path.join(EXPIRED_DIR, hit), entryPath(hit.replace(/\.md$/, "")));
-      logActivity(`restore ${hit.replace(/\.md$/, "")} from=expired/`);
-      return `${hit.replace(/\.md$/, "")} 已从 expired/ 恢复（status=expired，仍不参与检索；要复活需再来一次 renew）。`;
-    }
+  const fromExpired = entryStore.restore(idPrefix, { from: "expired" });
+  if (fromExpired) {
+    logActivity(`restore ${fromExpired.meta.id} from=expired/`);
+    return `${fromExpired.meta.id} 已从 expired/ 恢复（status=expired，仍不参与检索；要复活需再来一次 renew）。`;
   }
-  if (!fs.existsSync(RECOVERY_DIR)) return "没有可恢复记录（recovery/ 为空）。";
-  const files = fs.readdirSync(RECOVERY_DIR).filter((f) => f.endsWith(".json"));
-  const f = files.find((x) => x === `${idPrefix}.json`) ?? files.find((x) => x.startsWith(idPrefix));
-  if (!f) {
-    const ids = files.map((x) => x.replace(/\.json$/, "")).sort().reverse();
-    return `找不到 ${idPrefix} 的删除记录。可恢复条目：${ids.slice(0, 10).join(", ") || "无"}${ids.length > 10 ? ` …（共 ${ids.length} 条）` : ""}`;
+  const ids = entryStore.recoverableIds();
+  if (!ids) return "没有可恢复记录（recovery/ 为空）。";
+  const rec = entryStore.restore(idPrefix, { from: "recovery" });
+  if (rec) {
+    logActivity(`restore ${rec.meta.id} kind=${rec.meta.kind} subject=${rec.meta.subject}`);
+    return `${rec.meta.id} 已从 recovery 恢复（status=${rec.meta.status}）。`;
   }
-  const rec = JSON.parse(fs.readFileSync(path.join(RECOVERY_DIR, f), "utf8")) as { meta: Meta; body: string };
-  const id = rec.meta.id;
-  if (fs.existsSync(entryPath(id))) return `${id} 条目仍在库中，无需恢复。`;
-  entryStore.put({ meta: rec.meta, body: rec.body });
-  fs.unlinkSync(path.join(RECOVERY_DIR, f));
-  logActivity(`restore ${id} kind=${rec.meta.kind} subject=${rec.meta.subject}`);
-  return `${id} 已从 recovery 恢复（status=${rec.meta.status}）。`;
+  // 记录还在 = 命中前缀但条目本就还在 entries/，restore 幂等跳过
+  const hit = entryStore.recoverableIds(idPrefix);
+  if (hit?.length) return `${hit[0]} 条目仍在库中，无需恢复。`;
+  const list = ids.sort().reverse();
+  return `找不到 ${idPrefix} 的删除记录。可恢复条目：${list.slice(0, 10).join(", ") || "无"}${list.length > 10 ? ` …（共 ${list.length} 条）` : ""}`;
 }
 
 // ---------- Phase 2：简报注入 ----------
@@ -3377,8 +3468,8 @@ function refreshProfile(dry = true): string {
         const hints: string[] = [];
         const twins = legacyTwins();
         if (twins) hints.push(`发现大写孪生文件 ${twins}（陈旧实例可能又写回来了）：/reload 后人工合并，否则写入会分叉`);
-        const pc = purgeCandidates(30);
-        if (pc.due.length) hints.push(`过期 ${pc.due.length} 条可归档（living_memory action=purge_expired 预览）`);
+        const pc = entryStore.purgeExpired(30, true);
+        if (pc.candidates.length) hints.push(`过期 ${pc.candidates.length} 条可归档（living_memory action=purge_expired 预览）`);
         const doneTodo = todoIndex().done;
         if (doneTodo > 0) hints.push(`todo.md 内已完成 ${doneTodo} 项可归档（/memory todo → 归档已完成）`);
         const dueTodo = dueRows();
