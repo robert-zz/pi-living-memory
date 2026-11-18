@@ -1,19 +1,4 @@
 # pi-living-memory
-
-Pi 扩展：**带生命周期的长期记忆**。事实不再是散文段落，而是有 `kind / status / scope / 过期 / 复核 / 证据来源` 的条目；工程实况与待办另有 `summary.md` / `todo.md` 两个文档面；三者各有一份派生索引，让每轮注入的上下文体积与库的规模脱钩。
-
-**文档**：[使用说明](docs/guide.md)（记什么/怎么查/怎么清） · [架构与数据流](docs/architecture.md)（架构图·时序图·状态机） · [演进路线](docs/roadmap.md)
-
-> **装之前请先读：它默认会做的事**
->
-> 1. **写盘**：在你的 `~/.pi/agent/memory/` 下建目录、写条目、写 `index.json` 等文件。删掉扩展不会删这些文件。
-> 2. **把对话交给模型（默认开）**：每个会话结束（`agent_settled`）时，扩展会把**本轮对话片段**（含你的提问与助手回复的结尾部分）发给**你自己配置的模型 provider** 做一次抽取，用来提出"值得记的事实"。抽取是本地代码调度、走你现有模型通道，**不经过第三方服务**，但确实会把文本发送给该 provider，并按你的 token 计费。不要这个行为：设 `LIVING_MEMORY_EXTRACT=0`。
-> 3. **可能自动"转事实"**（默认开）：抽取给出的候选若 `basis=inference` 且 `confidence ≥ 0.85`，会直接写成 `status=confirmed`（`LIVING_MEMORY_AUTO_FACT` 可调，`1` 关闭）。`relation` 与 `action_impact=needs-confirm` 永不自动转正。
-> 4. **开屏提示**：会话启动时可能在状态栏/通知里提示"过期 N 条""待办 N 项到期""画像 30 天未归纳"等（`LIVING_MEMORY_START_HINTS=0` 关）。
->
-> 数据全部是纯文本 markdown + JSON，无数据库、无网络上报；想彻底清空就 `rm -rf ~/.pi/agent/memory`（先备份）。
-
-
 ## English quick start
 
 Durable, auditable long-term memory for a Pi session: facts are records with lifecycle
@@ -35,12 +20,27 @@ per-turn prompt cost stays flat as the library grows.
   `LIVING_MEMORY_PROFILE_BRIEF` · `LIVING_MEMORY_AUTO_FACT_EVIDENCE`.
 - **Before installing, know the defaults**: it writes `~/.pi/agent/memory/`, and by default
   sends the tail of each conversation to *your own* model provider for memory extraction
-  (`LIVING_MEMORY_EXTRACT=0` disables). The Chinese section above spells out every side effect.
+  (`LIVING_MEMORY_EXTRACT=0` disables). The Chinese section below spells out every side effect.
 - **Tests**: `bun tests/run.ts` — 28 cases / 137 assertions against a temporary HOME, never your real store.
 - **Dependencies**: `typebox` and `@earendil-works/*` are host-provided. They are declared as
   `peerDependencies` and never bundled (a physical copy would bypass Pi's module mapping).
 
 Behavior, design trade-offs and the pitfalls we hit are documented in Chinese below.
+
+
+Pi 扩展：**带生命周期的长期记忆**。事实不再是散文段落，而是有 `kind / status / scope / 过期 / 复核 / 证据来源` 的条目；工程实况与待办另有 `summary.md` / `todo.md` 两个文档面；三者各有一份派生索引，让每轮注入的上下文体积与库的规模脱钩。
+
+**文档**：[使用说明](docs/guide.md)（记什么/怎么查/怎么清） · [架构与数据流](docs/architecture.md)（架构图·时序图·状态机） · [演进路线](docs/roadmap.md)
+
+> **装之前请先读：它默认会做的事**
+>
+> 1. **写盘**：在你的 `~/.pi/agent/memory/` 下建目录、写条目、写 `index.json` 等文件。删掉扩展不会删这些文件。
+> 2. **把对话交给模型（默认开）**：每个会话结束（`agent_settled`）时，扩展会把**本轮对话片段**（含你的提问与助手回复的结尾部分）发给**你自己配置的模型 provider** 做一次抽取，用来提出"值得记的事实"。抽取是本地代码调度、走你现有模型通道，**不经过第三方服务**，但确实会把文本发送给该 provider，并按你的 token 计费。不要这个行为：设 `LIVING_MEMORY_EXTRACT=0`。
+> 3. **可能自动"转事实"**（默认开）：抽取给出的候选若 `basis=inference` 且 `confidence ≥ 0.85`，会直接写成 `status=confirmed`（`LIVING_MEMORY_AUTO_FACT` 可调，`1` 关闭）。`relation` 与 `action_impact=needs-confirm` 永不自动转正。
+> 4. **开屏提示**：会话启动时可能在状态栏/通知里提示"过期 N 条""待办 N 项到期""画像 30 天未归纳"等（`LIVING_MEMORY_START_HINTS=0` 关）。
+>
+> 数据全部是纯文本 markdown + JSON，无数据库、无网络上报；想彻底清空就 `rm -rf ~/.pi/agent/memory`（先备份）。
+
 
 ## 安装
 
