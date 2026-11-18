@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.1.14] - 2026-11-18
+
+召回词元的 2 字母白名单。
+
+- `ASCII_SHORT_OK`：`ai/ci/pr/ui/db/ss` 六个技术缩写即使在 2 字母也进索引与查询（`PR 评审`、`CI 失败`、`AI 配图`、`DB 迁移` 现在能召回），非白名单的 2 字母词（`qa/is/to`）仍被丢弃。可用 `LIVING_MEMORY_RECALL_2L` 覆盖（逗号分隔，全小写）。
+- 索引版本 `v=3 → v=4`：`rows.every(toks)` 守卫只查字段存在、感知不到词元内容变化，白名单改了词元集合就必须升版本，否则旧 v3 索引会被继续沿用（三个派生索引会在下次启动各重建一次，无数据风险）。
+- 测试新增 `recall-ascii-short`（5 断言）：白名单四词召回 + 非白名单词不召回；全套 192 断言 / 39 用例。
+
+## [0.1.13] - 2026-11-18
+
+召回调参：高频词元过滤、最少命中约束、ASCII 整词。
+
+- `tokensOf`：中文仍走 bigram；ASCII 改为按空白/标点切的整词且只保留长度 ≥3（`-A` 与 2 字母碎片不再进索引，不做子词/前缀匹配），入参保留原始标点才能保住词边界。词元内容变了 → 索引 `v=3`，旧索引一律重建；真库 115 条重建后 `index.json` 63,184 → 62,530 字节（单行词元上限 40 未变）
+- 中文高频闸门：`df/N > 0.05` 的中文词元不参与打分（用户/域名/发布/英文这类）；过滤后查询侧无词元直接返回空；语料 <20 条时比例没有统计意义，不启用
+- 最少命中：至少 2 个参与打分的词元命中；仅 1 个时只放行 ASCII 整词且 `idf ≥ 3.5`（staging/tauri 这类专名）
+- 中文与 ASCII 为什么不对称：中文 bigram 切不出专名——N=85 时 域名/自己 的 idf 也能到 3.5+，单命中放行几乎全是假阳性；ASCII 整词是技术标识符（npm/2fa/staging），出现频率高也仍有区分度，所以豁免高频闸门并独享单命中例外
+- 语料统计改为「状态/scope 合格的全部条目」，简报去重只影响输出：否则简报抽走几十条会把 df 压到 1、idf 虚高到 3.9，通用词又会被单命中例外放行
+- 测试新增 `recall-stopword` / `recall-ascii-exempt` / `recall-single-token` / `recall-hitcount`；共 38 用例 / 187 断言
+
+## [0.1.12] - 2026-11-18
+
+按问题召回与零命中日志。
+
+- `index.json` 行新增 `toks`（中文 bigram + ASCII 词元，最多 40 个）；`v=2` 且缺 `toks` 的旧索引自动重建（`writeEntry` upsert / 删除 / 全量重建三条路径都带词元）
+- `recallFor(query, cwd, excludeIds)`：只在索引行上跑 BM25（`k1=1.2, b=0.75`，subject 命中 ×3），返回 top 3；行数超 `LIVING_MEMORY_RECALL_MAX_ROWS`（默认 20000）时只用 subject 词元打分
+- 简报尾部新增召回段（最多 3 条、subject ≤80 字符、整段 ≤300 字符，按简报已含 id 去重；预算不够先砍召回段）；`LIVING_MEMORY_RECALL=0` 关闭
+- `source=entries` 零命中（`q` ≥2 字符）写 `miss.log`（保留最后 200 行，`withFileLockSync` 内读—改—写）；`LIVING_MEMORY_MISS_LOG=0` 关闭
+- 测试新增 `index-toks` / `recall-rank` / `recall-limits` / `recall-dedup` / `recall-off` / `miss-log`；共 174 断言
+
 ## [0.1.11] - 2026-11-17
 
 画廊元数据：README 首屏英文化（安装/数据/工具/开关六行速览），`pi.image` 指向 1200px 白底预览图（`docs/img/01-architecture-ai.webp`，37K）。

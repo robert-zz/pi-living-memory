@@ -222,10 +222,40 @@ function withFileLockSync<T>(file: string, fn: () => T): T {
     }
   }
 }
-type EntryIndex = { id: string; meta: Meta; title: string };
+type EntryIndex = { id: string; meta: Meta; title: string; toks: string[] };
 const INDEX_FILE = path.join(STORE, "index.json");
+const MISS_FILE = path.join(STORE, "miss.log");
+const MISS_KEEP = 200;
 /** 派生索引的格式版本：字段或语义变化时递增；stamp 相同不代表格式相同，旧索引一律重建 */
-const IDX_VERSION = 2;
+const IDX_VERSION = 4;
+
+/**
+ * 2 字母 ASCII 白名单：`ai/ci/pr/ui/db/ss` 这类本是技术标识符，被 ≥3 的规则误杀会让「PR 评审」「CI 失败」
+ * 这类提问召回不到。默认值可被 `LIVING_MEMORY_RECALL_2L` 覆盖/追加（逗号分隔，全小写）。
+ */
+const ASCII_SHORT_OK = new Set(
+  (process.env.LIVING_MEMORY_RECALL_2L ?? "ai,ci,pr,ui,db,ss")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean),
+);
+/**
+ * 召回词元：索引与查询共用同一套切法，避免 BM25 只在一边成立。
+ * 中文走 bigram：每个连续汉字段取所有相邻两字组合，单字段保留其本身。
+ * ASCII 走整词：按空白/标点切成整词，只保留长度 ≥3 的（以及 2 字母白名单 `ASCII_SHORT_OK` 里的技术缩写），
+ * `-A` 这类碎片与 `is/to` 这类功能词不进索引，不做子词或前缀匹配。入参保留原始空白与标点，词边界才不会在归一化时被抹掉。
+ * 字典序去重后截断到 40 个，控制索引体积。
+ */
+function tokensOf(text: string): string[] {
+  const out = new Set<string>();
+  for (const m of text.toLowerCase().matchAll(/[a-z0-9]+/g)) if (m[0].length >= 3 || ASCII_SHORT_OK.has(m[0])) out.add(m[0]);
+  for (const m of text.matchAll(/\p{Script=Han}+/gu)) {
+    const run = m[0];
+    if (run.length === 1) out.add(run);
+    else for (let i = 0; i + 1 < run.length; i++) out.add(run.slice(i, i + 2));
+  }
+  return [...out].sort().slice(0, 40);
+}
 let indexCache: { stamp: string; rows: EntryIndex[] } | null = null;
 
 function dirStamp(): string {
@@ -242,7 +272,8 @@ function toIndexRow(meta: Meta, title: string): EntryIndex {
   for (const k of ["id", "kind", "status", "subject", "scope", "action_impact", "obtained_at", "expires_at", "review_after", "supersedes", "confidence"]) {
     if (meta[k]) keep[k] = meta[k];
   }
-  return { id: meta.id, meta: keep, title };
+  // 词元由「subject + 标题」生成：召回只在索引行上算分，正文不参与（保留原空白/标点给 ASCII 整词用）
+  return { id: meta.id, meta: keep, title, toks: tokensOf(`${meta.subject ?? ""} ${title}`) };
 }
 
 // 索引里的标题是摘要不是全文：中文每字 3 字节，160 字会让索引逼近正文体积
@@ -258,7 +289,8 @@ function loadEntriesIndex(): EntryIndex[] {
   if (indexCache && indexCache.stamp === stamp) return indexCache.rows;
   try {
     const raw = JSON.parse(fs.readFileSync(INDEX_FILE, "utf8"));
-    if (raw?.v === IDX_VERSION && raw?.stamp === stamp && Array.isArray(raw.rows)) {
+    // v 不符重建；同版本但没有 toks 的旧行也重建（格式闸门不能只看顶层 v）
+    if (raw?.v === IDX_VERSION && raw?.stamp === stamp && Array.isArray(raw.rows) && raw.rows.every((r: any) => Array.isArray(r?.toks))) {
       indexCache = { stamp, rows: raw.rows as EntryIndex[] };
       return indexCache.rows;
     }
@@ -313,6 +345,7 @@ function refreshIndexRow(meta: Meta, body: string) {
   const fresh = toIndexRow(meta, titleOf(body));
   row.meta = fresh.meta;
   row.title = fresh.title;
+  row.toks = fresh.toks;
   flushIndex();
 }
 const invalidateIndex = () => {
@@ -1773,6 +1806,74 @@ function matchesQuery(e: Entry, q: string): boolean {
   return kwAll(`${e.meta.subject}\n${e.meta.kind}\n${e.meta.scope}\n${e.body}`, q);
 }
 
+// 零命中日志：帮助发现“用户问过但库里没有”的缺口；失败绝不能影响检索
+type EntrySearchParams = {
+  status?: string;
+  kind?: string;
+  subject_contains?: string;
+  text_contains?: string;
+  due?: boolean;
+  limit?: number;
+  scope?: string;
+  list?: boolean;
+};
+
+/** 记一行零命中（q 至少 2 字符）；miss.log 保留最后 200 行。整个读—改—写进文件锁，写失败静默 */
+function noteSearchMiss(q: string, cwd?: string, scope?: string): void {
+  if (process.env.LIVING_MEMORY_MISS_LOG === "0" || q.length < 2) return;
+  try {
+    ensureDirs();
+    const line = `${new Date().toISOString()} | q=${q.replace(/\r?\n/g, " ")} | cwd=${path.basename(cwd ?? "") || "-"} | scope=${scope?.trim() || "-"}`;
+    withFileLockSync(MISS_FILE, () => {
+      let lines: string[] = [];
+      try {
+        lines = fs.readFileSync(MISS_FILE, "utf8").split("\n").filter(Boolean);
+      } catch {
+        /* 首次零命中 */
+      }
+      lines.push(line);
+      const kept = lines.length > MISS_KEEP ? lines.slice(-MISS_KEEP) : lines;
+      writeAtomic(MISS_FILE, `${kept.join("\n")}\n`);
+    });
+  } catch {
+    /* 日志只是线索，写不进去不能影响检索 */
+  }
+}
+
+/** entries 检索（工具与零命中日志共用）：元数据筛选走索引，只有全文匹配才装载正文 */
+function searchEntries(q: string, p: EntrySearchParams, cwd?: string): string {
+  let rows = loadEntriesIndex();
+  if (p.status) rows = rows.filter((r) => r.meta.status === p.status);
+  if (p.kind) rows = rows.filter((r) => r.meta.kind === p.kind);
+  if (p.scope) {
+    const want = p.scope.trim();
+    rows = rows.filter((r) => (r.meta.scope || "global").split(",").map((s) => s.trim()).includes(want));
+  }
+  if (p.subject_contains) rows = rows.filter((r) => r.meta.subject.includes(p.subject_contains!));
+  if (p.text_contains) rows = rows.filter((r) => (parseEntry(entryPath(r.id))?.body ?? "").includes(p.text_contains!));
+  if (q) {
+    rows = rows.filter((r) => {
+      const full = parseEntry(entryPath(r.id));
+      return full ? matchesQuery(full, q) : false;
+    });
+  }
+  if (p.due) rows = rows.filter((r) => ACTIVE.has(r.meta.status) && isDue(r.meta));
+  const lim = Math.min(p.limit ?? 30, 100);
+  if (!rows.length) {
+    if (q.length >= 2) noteSearchMiss(q, cwd, p.scope);
+    return "（无匹配条目）";
+  }
+  const render = (r: EntryIndex) => {
+    if (p.list) return `${r.id} ${r.meta.kind}/${r.meta.status} ${r.meta.subject}`;
+    const tags = [r.meta.kind, r.meta.status, `scope=${r.meta.scope}`];
+    if (r.meta.confidence) tags.push(`conf=${r.meta.confidence}`);
+    if (r.meta.supersedes) tags.push(`supersedes=${r.meta.supersedes}`);
+    if (ACTIVE.has(r.meta.status) && isDue(r.meta)) tags.push("DUE");
+    return `${r.id} [${tags.join(" · ")}] ${r.meta.subject}: ${r.title.replace(/\n/g, " ")}`;
+  };
+  return `共 ${rows.length} 条${p.status ? "" : `（活动 ${rows.filter((r) => ACTIVE.has(r.meta.status)).length}）`}（显示前 ${Math.min(rows.length, lim)}）：\n\n${rows.slice(0, lim).map(render).join("\n")}`;
+}
+
 function searchTodos(q: string): string {
   let text = "";
   try {
@@ -2084,7 +2185,105 @@ function renderRouting(): string {
   return out.join("\n");
 }
 
-function buildBrief(cwd?: string): string {
+// ---------- 按问题召回：索引行上的 BM25，命中后才读正文 ----------
+/** 只有这些状态的条目能进召回；推断（inference）仍须人工确认，不直接当事实引用 */
+const RECALL_STATUS = new Set(["confirmed", "explicit", "event"]);
+/** 高频词元闸门：中文词元 df/N 大于 5% 不参与打分（用户/域名/发布/英文这类常见词） */
+const RECALL_STOP_DF = 0.05;
+/** ASCII 整词判定（tokensOf 已小写）：豁免高频闸门，并独享单命中例外（见下方不对称说明） */
+const RECALL_ASCII = /^[a-z0-9]+$/;
+/** 条目少于 20 条时 df/N 没有统计意义（1 条就能占 10%），不启用高频词元闸门 */
+const RECALL_STOP_MIN_DOCS = 20;
+/** 单命中例外：只命中 1 个 ASCII 整词且 idf ≥ 3.5（staging/tauri 这类专名）才放行 */
+const RECALL_SINGLE_IDF = 3.5;
+
+/**
+ * 召回第一阶段：只在索引行（meta.subject/title/toks）上算 BM25，绝不读 entries 正文。
+ * 第二阶段由命中 id 的调用方按需 parseEntry；本函数只回 top 3 的 id/subject/title/score。
+ *
+ * 中文与 ASCII 两套规则为什么不对称：中文 bigram 切不出「专名」，域名/自己/岗位 这类通用词
+ * 在 N=85 时 idf 也能到 3.5+，单命中放行几乎全是假阳性（「域名在哪里注册」召回 FoxyProxy 规则）；
+ * 所以中文词元一律按 df/N > 5% 过滤，且不享受单命中例外。ASCII 整词是技术标识符
+ * （npm/2fa/staging/tauri），出现频率高也仍有区分度，因此豁免高频闸门，并独享 idf ≥ 3.5 的单命中例外。
+ */
+function recallFor(query: string, cwd?: string, excludeIds?: Set<string>): Array<{ id: string; subject: string; title: string; score: number }> {
+  const q = String(query ?? "").trim().slice(0, 200);
+  const qToks = tokensOf(q);
+  if (!q || !qToks.length) return [];
+  const configured = Number(process.env.LIVING_MEMORY_RECALL_MAX_ROWS ?? 20000);
+  const maxRows = Number.isFinite(configured) && configured > 0 ? Math.floor(configured) : 20000;
+  // 语料口径 = 状态/scope 合格的全部条目；excludeIds（简报已展示）只影响输出，不参与 df/N 统计，
+  // 否则简报抽走几十条会把 df 压到 1，idf 虚高到 3.9，单命中例外就会放行通用词
+  const corpus = loadEntriesIndex().filter(
+    (r) => RECALL_STATUS.has(r.meta.status ?? "") && inScope(r, cwd),
+  );
+  // 硬上限：行数超限时只取索引前 maxRows 行（索引按 id 倒序，即优先较新条目）
+  const degraded = corpus.length > maxRows;
+  const rows = degraded ? corpus.slice(0, maxRows) : corpus;
+  if (!rows.length) return [];
+  const docs = rows.map((row) => {
+    // 退化路径：超上限时只认 subject 词元（标题词元不参与），避免长尾行把打分拖慢
+    const toks = degraded ? tokensOf(row.meta.subject ?? "") : Array.isArray(row.toks) ? row.toks : [];
+    const tf = new Map<string, number>();
+    for (const t of toks) tf.set(t, (tf.get(t) ?? 0) + 1);
+    return { row, tf, dl: toks.length, sub: new Set(tokensOf(row.meta.subject ?? "")) };
+  });
+  const df = new Map<string, number>();
+  for (const d of docs) for (const t of qToks) if (d.tf.has(t)) df.set(t, (df.get(t) ?? 0) + 1);
+  const N = docs.length;
+  // 高频词元不参与打分：df/N > 5% 的中文词（用户/域名/发布/英文）区分度太低，留着只会把无关条目顶上来；
+  // ASCII 整词豁免（npm/2fa 在本库出现 >5% 但仍是技术标识符，过滤掉会把正确的 npm 条目一起弄丢）。
+  // 库里条目太少时比例没有统计意义（1 条就能占 10%），此时不过滤，交给下面的最少命中闸门。
+  const active =
+    N >= RECALL_STOP_MIN_DOCS
+      ? qToks.filter((t) => RECALL_ASCII.test(t) || (df.get(t) ?? 0) / N <= RECALL_STOP_DF)
+      : qToks;
+  if (!active.length) return [];
+  const avgdl = Math.max(1, docs.reduce((sum, d) => sum + d.dl, 0) / N);
+  const k1 = 1.2;
+  const b = 0.75;
+  const activeSet = new Set(active);
+  const scored = docs
+    .filter((d) => !excludeIds?.has(d.row.id))
+    .map((d) => {
+      let score = 0;
+      let hits = 0;
+      let maxIdf = 0;
+      let subHit = false;
+      let singleAscii = false;
+      // 命中数只数参与打分的词元：被高频闸门过滤的「英文」不算命中，否则它会替无关条目凑够 2 个
+      for (const t of qToks) {
+        const tf = d.tf.get(t);
+        if (!tf || !activeSet.has(t)) continue;
+        hits++;
+        singleAscii = RECALL_ASCII.test(t);
+        const dfi = df.get(t) ?? 0;
+        const idf = Math.log(1 + (N - dfi + 0.5) / (dfi + 0.5));
+        maxIdf = Math.max(maxIdf, idf);
+        const weight = (tf * (k1 + 1)) / (tf + k1 * (1 - b + (b * d.dl) / avgdl));
+        // subject 命中 ×3：索引行不另存 subject 专属 toks，命中时从 meta.subject 重切一次比对
+        score += idf * weight * (d.sub.has(t) ? 3 : 1);
+        if (d.sub.has(t)) subHit = true;
+      }
+      return { id: d.row.id, subject: d.row.meta.subject ?? "", title: d.row.title ?? "", score, hits, maxIdf, subHit, singleAscii };
+    })
+    // 最少命中：2 个不同词元；或 1 个 ASCII 专名且 idf ≥ 3.5（中文单命中一律不放行）
+    .filter((x) => x.score > 0 && (x.hits >= 2 || (x.hits === 1 && x.singleAscii && x.maxIdf >= RECALL_SINGLE_IDF)));
+  scored.sort((a, b2) => b2.score - a.score || Number(b2.subHit) - Number(a.subHit) || (a.id < b2.id ? 1 : -1));
+  return scored.slice(0, 3);
+}
+
+/** 简报尾部召回段：固定格式、最多 3 条、整段 ≤300 字符 */
+function recallLine(query: string | undefined, cwd: string | undefined, excludeIds: Set<string>): string {
+  if (process.env.LIVING_MEMORY_RECALL === "0" || !query) return "";
+  const hits = recallFor(query, cwd, excludeIds);
+  if (!hits.length) return "";
+  const items = hits.map((h) => `[${h.subject.slice(0, 80)}](${h.id.slice(0, 8)})`);
+  const line = `· 召回（按本轮提问）：${items.join(" · ")}`;
+  return line.length > 300 ? line.slice(0, 300) : line;
+}
+
+function buildBrief(cwd?: string, query?: string): string {
   const { active, pending, due } = briefIndex();
   if (!active.length) return "";
   const base = path.basename(cwd ?? "");
@@ -2114,6 +2313,7 @@ function buildBrief(cwd?: string): string {
     { tag: "", cap: 5, items: glob },
   ];
   const lines: string[] = [];
+  const usedIds = new Set<string>();
   let used = 0;
   let dropped = 0;
   for (const t of tiers) {
@@ -2129,6 +2329,7 @@ function buildBrief(cwd?: string): string {
         continue;
       }
       lines.push(text);
+      usedIds.add(e.id);
       used += text.length + 1;
       n++;
     }
@@ -2183,10 +2384,35 @@ function buildBrief(cwd?: string): string {
     }
   }
 
+  // 召回段必须排在所有分档/待办/画像之后；预算不够时先砍它，不挤占既有档位
+  const recall = recallLine(query, cwd, usedIds);
+  if (recall && used + recall.length + 1 <= BRIEF_MAX_CHARS) {
+    lines.push(recall);
+    used += recall.length + 1;
+  }
+
   const shownNote = `${lines.length}/${visible.length}${dropped ? `（${dropped} 条未显示，用 living_memory 查全文）` : ""}`;
   const dueTodoCount = dueRows().length;
   const tail = `\n（活动 ${active.length} · 到期 ${due.length} · 待确认 ${pending.length} · 简报 ${shownNote}${openTodos ? ` · 待办 ${openTodos} 项` : ""}${dueTodoCount ? ` · 待办到期 ${dueTodoCount} 项` : ""} — 检索 source=todo/summary/entries；治理 /memory）`;
   return `\n\n## Living Memory（个人长期记忆层 · Today 契约）\n到期项需处理；[待确认] 是未经确认的推断，只能作弱参考，不得当事实引用。完整正文用 living_memory；纠正用 living_memory_update supersede；工程实况用 living_memory source=summary/todo 检索；待办勾选用 living_memory_update action=todo_done match=唯一关键词。\n${lines.join("\n")}${tail}`;
+}
+
+/** 本轮提问：事件直接给的 prompt 优先；没有就退到会话最后一条 user 消息；都没有返回空（不报错） */
+function currentUserPrompt(event: any, ctx: any): string {
+  const direct = typeof event?.prompt === "string" ? event.prompt.trim() : "";
+  if (direct) return direct.slice(0, 200);
+  try {
+    const entries = ctx?.sessionManager?.getEntries?.() ?? [];
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const e = entries[i];
+      if (e?.type !== "message" || e?.message?.role !== "user") continue;
+      const text = textOf(e.message).trim();
+      if (text) return text.slice(0, 200);
+    }
+  } catch {
+    /* 会话形状由宿主决定，拿不到就当没有查询 */
+  }
+  return "";
 }
 
 // ---------- Phase 3：自动抽取 ----------
@@ -2526,6 +2752,7 @@ export default function (pi: ExtensionAPI) {
         Type.String({ description: "关键词检索（空格分隔=全部命中）；source=todo/summary 时检索对应文档，source=entries 时按 subject+正文过滤" }),
       ),
       project: Type.Optional(Type.String({ description: "source=summary 时按项目分节过滤（默认取当前工作目录名）" })),
+      scope: Type.Optional(Type.String({ description: "按 scope 精确过滤（如 project:acme）；entries 检索与零命中日志共用" })),
       status: Type.Optional(Type.String({ description: "过滤状态：explicit/event/inference/confirmed/superseded/expired" })),
       kind: Type.Optional(StringEnum(KINDS)),
       subject_contains: Type.Optional(Type.String()),
@@ -2534,7 +2761,7 @@ export default function (pi: ExtensionAPI) {
       list: Type.Optional(Type.Boolean({ description: "true=精简列表（只回 id/kind/status/subject，不返回标题与正文），浏览巡检用" })),
       limit: Type.Optional(Type.Number()),
     }),
-    async execute(_toolCallId: string, p: any, ctx: any) {
+    async execute(_toolCallId: string, p: any, _sig: any, _upd: any, ctx: any) {
       const src: string = p.source || "entries";
       const q = String(p.query ?? "").trim();
       // 文档检索面：todo.md（未完成事项）/ summary.md（工程实况，默认按 cwd 项目分节）
@@ -2565,36 +2792,7 @@ export default function (pi: ExtensionAPI) {
         return { content: [{ type: "text", text: parts.join("\n\n") }] };
       }
       // 元数据筛选走索引（一次读盘，frontmatter + 首行摘要）；只有全文匹配时才装载正文
-      let rows = loadEntriesIndex();
-      if (p.status) rows = rows.filter((r) => r.meta.status === p.status);
-      if (p.kind) rows = rows.filter((r) => r.meta.kind === p.kind);
-      if (p.subject_contains) rows = rows.filter((r) => r.meta.subject.includes(p.subject_contains));
-      if (p.text_contains) rows = rows.filter((r) => (parseEntry(entryPath(r.id))?.body ?? "").includes(p.text_contains));
-      if (q) {
-        rows = rows.filter((r) => {
-          const full = parseEntry(entryPath(r.id));
-          return full ? matchesQuery(full, q) : false;
-        });
-      }
-      if (p.due) rows = rows.filter((r) => ACTIVE.has(r.meta.status) && isDue(r.meta));
-      const lim = Math.min(p.limit ?? 30, 100);
-      if (!rows.length) return { content: [{ type: "text", text: "（无匹配条目）" }] };
-      const render = (r: EntryIndex) => {
-        if (p.list) return `${r.id} ${r.meta.kind}/${r.meta.status} ${r.meta.subject}`;
-        const tags = [r.meta.kind, r.meta.status, `scope=${r.meta.scope}`];
-        if (r.meta.confidence) tags.push(`conf=${r.meta.confidence}`);
-        if (r.meta.supersedes) tags.push(`supersedes=${r.meta.supersedes}`);
-        if (ACTIVE.has(r.meta.status) && isDue(r.meta)) tags.push("DUE");
-        return `${r.id} [${tags.join(" · ")}] ${r.meta.subject}: ${r.title.replace(/\n/g, " ")}`;
-      };
-      return {
-        content: [
-          {
-            type: "text",
-            text: `共 ${rows.length} 条${p.status ? "" : `（活动 ${rows.filter((r) => ACTIVE.has(r.meta.status)).length}）`}（显示前 ${Math.min(rows.length, lim)}）：\n\n${rows.slice(0, lim).map(render).join("\n")}`,
-          },
-        ],
-      };
+      return { content: [{ type: "text", text: searchEntries(q, p, ctx?.cwd) }] };
     },
   });
 
@@ -3165,7 +3363,7 @@ function refreshProfile(dry = true): string {
   pi.on("before_agent_start", async (event: any, ctx: any) => {
     try {
       if (process.env.LIVING_MEMORY_BRIEF === "0") return;
-      const block = buildBrief(ctx?.cwd);
+      const block = buildBrief(ctx?.cwd, currentUserPrompt(event, ctx));
       if (!block) return;
       return { systemPrompt: event.systemPrompt + block };
     } catch {

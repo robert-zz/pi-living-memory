@@ -76,6 +76,7 @@ pi install /path/to/pi-living-memory
 ├── index.json          entries 派生索引（带 v 格式版本；过期/删掉自动重建，不丢数据）
 ├── summary-index.json  summary.md 目录索引
 ├── todo-index.json     todo.md 派生索引
+├── miss.log            零命中日志（最近 200 条，供补库参考）
 ├── extract-failures.jsonl 抽取失败台账（最近 50 条）
 ├── expired/            purge 搬出的失效条目（索引文件 + 正文）
 ├── recovery/           每次写入前的上一版，按天轮转
@@ -147,6 +148,18 @@ pi install /path/to/pi-living-memory
 | `LIVING_MEMORY_QMD_TIMEOUT_MS` | 60000 | qmd 调用超时 |
 | `LIVING_MEMORY_DEBUG` | 关 | `1` 输出抽取/内部调试日志 |
 | `LIVING_MEMORY_ACTIVITY_MAX` | 500 | activity.log 轮转前的行数上限 |
+| `LIVING_MEMORY_RECALL` | 开 | `0` 关掉简报尾部的按问题召回段 |
+| `LIVING_MEMORY_RECALL_MAX_ROWS` | 20000 | 召回 BM25 最多打分的索引行数（超限退化为只用 subject 词元） |
+| `LIVING_MEMORY_RECALL_2L` | `ai,ci,pr,ui,db,ss` | 2 字母 ASCII 白名单（技术缩写仍进索引/查询），逗号分隔 |
+| `LIVING_MEMORY_MISS_LOG` | 开 | `0` 关掉 `miss.log` 零命中记录 |
+
+## 按问题召回
+
+简报每轮会按**本轮用户消息**在索引行上跑一次 BM25，只补 3 条未进分档的相关条目，附在简报末尾：`· 召回（按本轮提问）：[subject](id 前 8 位) · …`。
+索引行带 `toks`（v=3 格式：中文 bigram + ASCII 整词，后者只留长度 ≥3，外加 `ai/ci/pr/ui/db/ss` 六个 2 字母技术缩写白名单，可用 `LIVING_MEMORY_RECALL_2L` 覆盖），召回阶段不读正文；命中后仍按 id 用 `living_memory` 取全文。
+打分前先过滤中文高频词元（`df/N > 5%`，如 用户/域名/发布/英文；语料 <20 条不启用），并要求至少 2 个有效词元命中；只命中 1 个时仅放行 ASCII 专名（`idf ≥ 3.5`，如 staging/tauri）。ASCII 整词豁免高频闸门——npm/2fa 这类技术标识符出现再多也仍有区分度。
+`LIVING_MEMORY_RECALL=0` 关闭；`LIVING_MEMORY_RECALL_MAX_ROWS` 限制参与打分的行数。
+零命中的 `source=entries` 查询会追加到 `miss.log`（保留 200 行），`LIVING_MEMORY_MISS_LOG=0` 关闭。
 
 ## 推断转正（口径 B）
 

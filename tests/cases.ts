@@ -38,6 +38,17 @@ export const CASES: Meta[] = [
   { id: "auto-fact", title: "推断：置信度 ≥0.85 自动按事实，低于降为弱参考", seed: "basic" },
   { id: "auto-fact-retro", title: "推断：A 会话启动按已存 confidence 追溯转事实", seed: "basic" },
   { id: "auto-fact-evidence", title: "推断：B 证据 ≥3 天且分 ≥0.8 自动转事实", seed: "basic" },
+  { id: "index-toks", title: "索引：v=3 + toks，旧版索引重建", seed: "basic" },
+  { id: "recall-rank", title: "召回：中文模糊说法命中并按 BM25 排序", seed: "basic" },
+  { id: "recall-limits", title: "召回：≤3 条 / 每条 subject ≤80 / 整段 ≤300", seed: "basic" },
+  { id: "recall-dedup", title: "召回：排除简报已含条目", seed: "basic" },
+  { id: "recall-off", title: "召回：LIVING_MEMORY_RECALL=0 不注入", seed: "basic" },
+  { id: "recall-stopword", title: "召回：中文高频词元被过滤且不单独放行", seed: "basic" },
+  { id: "recall-ascii-exempt", title: "召回：高频 ASCII 整词仍参与打分", seed: "basic" },
+  { id: "recall-single-token", title: "召回：单命中只认 ASCII 专名（idf ≥3.5）", seed: "basic" },
+  { id: "recall-hitcount", title: "召回：被过滤词元不计入最少命中数", seed: "basic" },
+  { id: "recall-ascii-short", title: "召回：2 字母技术缩写白名单（ai/ci/pr/ui/db/ss）", seed: "basic" },
+  { id: "miss-log", title: "零命中：写 miss.log / 命中不写 / 开关关闭", seed: "basic" },
 ];
 
 const checks: Array<{ name: string; ok: boolean; detail?: string }> = [];
@@ -52,6 +63,21 @@ const read = (home: string, p: string) => {
 };
 const exists = (home: string, p: string) => fs.existsSync(path.join(mem(home), p));
 const count = (s: string, re: RegExp) => (s.match(re) ?? []).length;
+
+/** 召回夹具：默认写 global/explicit 条目，方便直接看简报与召回排序 */
+const addGlobal = (home: string, e: { id: string; subject: string; body: string }) =>
+  writeEntry(home, { kind: "decision", status: "explicit", scope: "global", ...e });
+const recallSeg = (txt: string) => txt.split("\n").find((l) => l.startsWith("· 召回（按本轮提问）：")) ?? "";
+const recallItems = (seg: string) => seg.replace("· 召回（按本轮提问）：", "").split(" · ").filter(Boolean);
+/** 填充条目：召回语料要够 N（df/N 比例与 idf 才有统计意义）；id 用较新日期，让简报优先展示它们而不是夹具目标 */
+const addFillers = (home: string, n: number) => {
+  for (let i = 0; i < n; i++)
+    addGlobal(home, { id: `20260105-0001${String(i).padStart(2, "0")}-f${String(i).padStart(3, "0")}`, subject: `填充条目${i}`, body: `填充正文${i}。` });
+};
+const recallOf = async (L: any, prompt: string) => {
+  const r: any = await L.handlers.before_agent_start({ systemPrompt: "BASE", prompt }, mkCtx("/work/acme"));
+  return recallSeg(String(r?.systemPrompt ?? ""));
+};
 
 async function body(id: string, home: string) {
   const AUTO_OFF = { LIVING_MEMORY_AUTO_TRIAGE: "0" };
@@ -459,7 +485,7 @@ async function body(id: string, home: string) {
       ok("needs-confirm 0.95 不追溯", /status: inference/.test(read1("20260101-000000-rtr4")), "");
       ok("开屏提示含自动按事实", /自动按事实处理/.test(ctx.notes.join(" | ")), ctx.notes.join(" | ").slice(0, 60));
       const idx = JSON.parse(fs.readFileSync(path.join(mem(home), "index.json"), "utf8"));
-      ok("旧格式索引被重建（带 v=2）", idx.v === 2, `v=${idx.v}`);
+      ok("旧格式索引被重建（带 v=4）", idx.v === 4, `v=${idx.v}`);
       ok("重建后索引含 confidence", idx.rows.some((r: any) => r.id === "20260101-000000-rtr1" && r.meta.confidence === "0.9"), "");
       return;
     }
@@ -516,6 +542,233 @@ async function body(id: string, home: string) {
       const ctx2 = mkCtx("/work/acme");
       await L2.handlers.session_start({ reason: "startup" }, ctx2);
       ok("开关 0 时不提示自动按事实", !/自动按事实处理/.test(ctx2.notes.join(" | ")), ctx2.notes.join(" | ").slice(0, 40));
+      return;
+    }
+    case "index-toks": {
+      const dir = path.join(mem(home), "entries");
+      const stamp = () => `${fs.statSync(dir).mtimeMs}|${fs.readdirSync(dir).filter((f) => f.endsWith(".md")).length}`;
+      const idxFile = path.join(mem(home), "index.json");
+      // 造假旧索引：stamp 完全匹配，但 v=1 且没有 toks——必须被格式闸门判过期
+      fs.writeFileSync(
+        idxFile,
+        JSON.stringify({ v: 1, stamp: stamp(), rows: [{ id: "20260101-000001-a1b2", meta: { id: "20260101-000001-a1b2", status: "explicit", subject: "旧索引" }, title: "旧索引" }] }),
+      );
+      const L = await load(home, AUTO_OFF);
+      const q = out(await L.call("living_memory", { source: "entries", query: "测试决策甲" }));
+      ok("旧索引仍可检索", q.includes("测试决策甲"), q.split("\n")[0].slice(0, 40));
+      const idx = JSON.parse(read(home, "index.json") || "{}");
+      ok("重建后顶层 v=4", idx.v === 4, `v=${idx.v}`);
+      ok("旧 v=1 行被替换", !idx.rows.some((r: any) => r.title === "旧索引"), `rows=${idx.rows?.length}`);
+      ok("每行都有 toks 数组", idx.rows.every((r: any) => Array.isArray(r.toks)), `rows=${idx.rows?.length}`);
+      const row = idx.rows.find((r: any) => r.id === "20260101-000001-a1b2");
+      ok("subject 中文 bigram 入词元", ["测试", "试决", "决策", "策甲"].every((t) => row?.toks?.includes(t)), (row?.toks ?? []).join(","));
+      ok("toks 字典序去重", idx.rows.every((r: any) => JSON.stringify([...new Set(r.toks)].sort()) === JSON.stringify(r.toks)));
+      ok("toks 上限 40", idx.rows.every((r: any) => r.toks.length <= 40), Math.max(...idx.rows.map((r: any) => r.toks.length)));
+      // 写路径：upsert 必须带 toks，删除必须只删那一行
+      const r1 = out(await L.call("remember", { kind: "decision", subject: "索引词元写入", text: "索引词元写入：验证 upsert。", basis: "explicit", source: "test" }));
+      const nid = r1.match(/(\d{8}-\d{6}-\w{4})/)?.[1] ?? "";
+      const idx2 = JSON.parse(read(home, "index.json") || "{}");
+      const nrow = idx2.rows.find((r: any) => r.id === nid);
+      ok("upsert 行带 toks", Array.isArray(nrow?.toks) && nrow.toks.includes("索引"), (nrow?.toks ?? []).slice(0, 4).join(","));
+      await L.call("living_memory_update", { action: "delete", id: nid });
+      const idx3 = JSON.parse(read(home, "index.json") || "{}");
+      ok("删除只移除对应行", !idx3.rows.some((r: any) => r.id === nid) && idx3.rows.some((r: any) => r.id === "20260101-000001-a1b2"));
+      // 同 v=3 但缺 toks 的索引也必须重建（否则召回会拿空词元静默失效）
+      fs.writeFileSync(
+        path.join(dir, "20260101-000003-t0k5.md"),
+        "---\nid: 20260101-000003-t0k5\nkind: decision\nstatus: explicit\nsubject: 词元校验\nscope: global\nobtained_at: 2026-01-01T00:00:00.000Z\n---\n词元校验正文。\n",
+      );
+      fs.writeFileSync(idxFile, JSON.stringify({ v: 3, stamp: stamp(), rows: idx3.rows.map(({ toks, ...rest }: any) => rest) }));
+      const q2 = out(await L.call("living_memory", { source: "entries", query: "词元校验" }));
+      const idx4 = JSON.parse(read(home, "index.json") || "{}");
+      ok("v=3 但缺 toks 也重建", q2.includes("词元校验") && idx4.rows.some((r: any) => r.id === "20260101-000003-t0k5" && Array.isArray(r.toks)), `rows=${idx4.rows?.length}`);
+      return;
+    }
+    case "recall-rank": {
+      addGlobal(home, { id: "20251231-999999-rclt", subject: "npm 发布时的 2FA 要求", body: "npm 发布时要输入验证码，发布前检查 2FA。" });
+      addGlobal(home, { id: "20260101-000000-r001", subject: "发布流程记录", body: "发布流程记录：常规检查清单。" });
+      addGlobal(home, { id: "20260101-000000-r002", subject: "验证接口联调", body: "验证接口联调：测试环境地址。" });
+      addGlobal(home, { id: "20260101-000000-r003", subject: "验证码样式", body: "验证码样式：六位数字。" });
+      for (const [id, subject] of [["20260101-000020-u020", "周报模板"], ["20260101-000030-u030", "会议纪要"], ["20260101-000040-u040", "磁盘配额"]] as const)
+        addGlobal(home, { id, subject, body: `${subject}正文：与本轮问题无关。` });
+      const L = await load(home, AUTO_OFF);
+      const r: any = await L.handlers.before_agent_start({ systemPrompt: "BASE", prompt: "发布要验证码" }, mkCtx("/work/acme"));
+      const txt = String(r?.systemPrompt ?? "");
+      const seg = recallSeg(txt);
+      ok("召回段存在", seg.length > 0, txt.slice(-80));
+      ok("中文模糊说法命中目标 subject", seg.includes("npm 发布时的 2FA 要求"), seg.slice(0, 100));
+      ok("目标排在相关干扰条目之前", seg.indexOf("npm 发布时的 2FA 要求") >= 0 && (seg.indexOf("验证码样式") < 0 || seg.indexOf("npm 发布时的 2FA 要求") < seg.indexOf("验证码样式")), seg.slice(0, 120));
+      ok("最多 3 条", recallItems(seg).length >= 1 && recallItems(seg).length <= 3, `${recallItems(seg).length} 条`);
+      ok("每条附 id 前 8 位", recallItems(seg).every((it) => /\(\d{8}\)$/.test(it)), recallItems(seg).join(" | ").slice(0, 80));
+      ok("目标只在召回段（未进分档）", txt.indexOf("npm 发布时的 2FA 要求") > txt.indexOf("· 召回（按本轮提问）："), `${txt.indexOf("npm 发布时的 2FA 要求")}/${txt.indexOf("· 召回（按本轮提问）：")}`);
+      const ctx2: any = mkCtx("/work/acme");
+      ctx2.sessionManager = {
+        getEntries: () => [{ type: "message", message: { role: "user", content: [{ type: "text", text: "发布要验证码" }] } }],
+      };
+      const r2: any = await L.handlers.before_agent_start({ systemPrompt: "BASE" }, ctx2);
+      ok("事件无 prompt 时退到会话最后一条 user 消息", recallSeg(String(r2?.systemPrompt ?? "")).includes("npm 发布时的 2FA 要求"), recallSeg(String(r2?.systemPrompt ?? "")).slice(0, 80));
+      return;
+    }
+    case "recall-limits": {
+      for (const n of [1, 2, 3, 4]) {
+        const id = `20251230-999999-l00${n}`;
+        addGlobal(home, { id, subject: `候选${n}：${"发布要验证码".repeat(30)}`, body: "发布要验证码的验证流程记录。" });
+      }
+      for (let i = 0; i < 6; i++) {
+        const id = `20260101-0001${String(i).padStart(2, "0")}-u1${String(i).padStart(2, "0")}`;
+        addGlobal(home, { id, subject: `无关条目${i}`, body: `无关条目${i}正文。` });
+      }
+      const L = await load(home, AUTO_OFF);
+      const r: any = await L.handlers.before_agent_start({ systemPrompt: "BASE", prompt: "发布要验证码" }, mkCtx("/work/acme"));
+      const txt = String(r?.systemPrompt ?? "");
+      const seg = recallSeg(txt);
+      const items = recallItems(seg);
+      ok("召回段长度 ≤300", seg.length > 0 && seg.length <= 300, `${seg.length} 字符`);
+      ok("召回条数 ≤3", items.length >= 1 && items.length <= 3, `${items.length} 条`);
+      ok("每条 subject ≤80 字符", items.every((it) => ((it.match(/^\[([^\]]*)\]/) ?? [])[1] ?? "").length <= 80), items.map((it) => (it.match(/^\[([^\]]*)\]/) ?? [])[1]?.length).join(","));
+      ok("每条带 id 前 8 位", items.every((it) => /\(\d{8}\)$/.test(it)));
+      ok("长 subject 被截断而不是整条丢弃", seg.includes("发布要验证码") && items.length === 3, `${items.length} 条 / ${seg.length} 字符`);
+      return;
+    }
+    case "recall-dedup": {
+      addGlobal(home, { id: "20251231-999999-dd01", subject: "测试决策乙", body: "测试决策乙正文：复核记录。" });
+      for (let i = 0; i < 4; i++) {
+        const id = `20260101-00002${i}-u2${String(i).padStart(2, "0")}`;
+        addGlobal(home, { id, subject: `无关条目${i}`, body: `无关条目${i}正文。` });
+      }
+      const L = await load(home, AUTO_OFF);
+      const r: any = await L.handlers.before_agent_start({ systemPrompt: "BASE", prompt: "测试决策" }, mkCtx("/work/acme"));
+      const txt = String(r?.systemPrompt ?? "");
+      const seg = recallSeg(txt);
+      ok("召回补上未进分档的同主题条目", seg.includes("测试决策乙"), seg.slice(0, 80));
+      ok("简报已含条目不再重复召回", !seg.includes("测试决策甲") && txt.split("\n").filter((l) => l.includes("测试决策甲")).length === 1, `行数 ${txt.split("\n").filter((l) => l.includes("测试决策甲")).length}`);
+      ok("去重后仍只回未含条目", seg.indexOf("测试决策乙") > 0 && !seg.includes("20260101-000001-a1b2"));
+      return;
+    }
+    case "recall-off": {
+      addGlobal(home, { id: "20251231-999999-dd01", subject: "测试决策乙", body: "测试决策乙正文：复核记录。" });
+      for (let i = 0; i < 4; i++) {
+        const id = `20260101-00002${i}-u2${String(i).padStart(2, "0")}`;
+        addGlobal(home, { id, subject: `无关条目${i}`, body: `无关条目${i}正文。` });
+      }
+      const L = await load(home, { LIVING_MEMORY_RECALL: "0", ...AUTO_OFF });
+      const r: any = await L.handlers.before_agent_start({ systemPrompt: "BASE", prompt: "测试决策" }, mkCtx("/work/acme"));
+      const txt = String(r?.systemPrompt ?? "");
+      ok("关闭后仍注入简报", txt.includes("长期记忆"), txt.slice(0, 40));
+      ok("关闭后没有召回段", !txt.includes("· 召回"), txt.slice(-80));
+      ok("关闭后未进分档的条目仍不出现", !txt.includes("测试决策乙"), `len=${txt.length}`);
+      return;
+    }
+    case "recall-stopword": {
+      // 23 条语料：域名 df=3/26 >5% 被过滤；真正相关的 npm 条目靠 ASCII 词元仍能召回
+      addGlobal(home, { id: "20251231-999001-sw01", subject: "域名注册备忘", body: "域名注册与续费由用户自己处理。" });
+      addGlobal(home, { id: "20251231-999002-sw02", subject: "英文内容站排期", body: "英文站点的域名与证书。" });
+      addGlobal(home, { id: "20251231-999003-sw03", subject: "用户偏好清单", body: "用户登记的域名偏好。" });
+      addGlobal(home, { id: "20251231-999004-sw04", subject: "npm 发布验证码处理", body: "npm 发布时的验证码：用 staging 设备走 CLI。" });
+      addFillers(home, 20);
+      const L = await load(home, AUTO_OFF);
+      const miss = await recallOf(L, "域名在哪里注册");
+      ok("中文高频词被过滤后不召回", miss === "", miss.slice(0, 80));
+      ok("单个高频中文词查询也直接返回空", (await recallOf(L, "域名")) === "", "");
+      const hit = await recallOf(L, "npm 发布要验证码");
+      ok("npm 发布要验证码仍召回正确条目", hit.includes("npm 发布验证码处理"), hit.slice(0, 100));
+      ok("只召回这一条", recallItems(hit).length === 1, `${recallItems(hit).length} 条`);
+      return;
+    }
+    case "recall-ascii-exempt": {
+      // npm(6/25)、staging(4/25)、2fa(4/28) 都超 5%，但都是技术标识符：不参与中文闸门，仍能靠它们打分
+      for (let i = 0; i < 5; i++)
+        addGlobal(home, { id: `20251231-99910${i}-nx0${i}`, subject: `npm 噪声条目${i}`, body: `npm 噪声记录${i}。` });
+      for (let i = 0; i < 3; i++)
+        addGlobal(home, { id: `20251231-99920${i}-st0${i}`, subject: `staging 设备${i}`, body: `staging 设备记录${i}。` });
+      for (let i = 0; i < 3; i++)
+        addGlobal(home, { id: `20251231-99930${i}-tf0${i}`, subject: `2fa 设备${i}`, body: `2fa 设备记录${i}。` });
+      addGlobal(home, { id: "20251231-999401-as01", subject: "npm staging 发布流程", body: "npm staging 发布流程的设备分工。" });
+      addGlobal(home, { id: "20251231-999402-as02", subject: "npm 2fa 验证方式", body: "npm 账号的 2fa 验证方式。" });
+      addFillers(home, 14);
+      const L = await load(home, AUTO_OFF);
+      const staging = await recallOf(L, "npm staging");
+      ok("高频 npm/staging 仍参与打分并召开发布流程", staging.includes("npm staging 发布流程"), staging.slice(0, 100));
+      ok("单命中 npm 噪声条目不召回", recallItems(staging).length === 1, `${recallItems(staging).length} 条`);
+      const twofa = await recallOf(L, "npm 2fa");
+      ok("高频 npm/2fa 仍参与打分并召回验证方式", twofa.includes("npm 2fa 验证方式"), twofa.slice(0, 100));
+      return;
+    }
+    case "recall-single-token": {
+      // 语料 66 条，df=1 时 idf ≈3.8（≥3.5）：只有 ASCII 专名能过，中文单命中与普通 ASCII 词都不行
+      addGlobal(home, { id: "20251231-999501-tau1", subject: "tauri 打包构建", body: "tauri 打包构建配置。" });
+      addGlobal(home, { id: "20251231-999502-rel1", subject: "release 版本记录一", body: "release 版本记录一。" });
+      addGlobal(home, { id: "20251231-999503-rel2", subject: "release 版本记录二", body: "release 版本记录二。" });
+      addGlobal(home, { id: "20251231-999504-iso1", subject: "隔离策略备忘", body: "隔离策略说明。" });
+      addFillers(home, 60);
+      const L = await load(home, AUTO_OFF);
+      ok("中文单命中即使 idf ≥3.5 也不召回", (await recallOf(L, "隔离")) === "", "");
+      ok("ASCII 普通词单命中 idf <3.5 不召回", (await recallOf(L, "release")) === "", "");
+      const ascii = await recallOf(L, "tauri");
+      ok("ASCII 专名单命中 idf ≥3.5 召回", ascii.includes("tauri 打包构建"), ascii.slice(0, 100));
+      return;
+    }
+    case "recall-hitcount": {
+      // 英文 4/43 >5% 被过滤；A 命中「英文+岗位」但只有岗位计分 → 1 命中丢弃；B 命中「岗位+简历」→ 2 命中召回
+      addGlobal(home, { id: "20251231-999601-hc01", subject: "英文岗位说明", body: "面向英文岗位的说明。" });
+      addGlobal(home, { id: "20251231-999602-hc02", subject: "岗位职责与简历", body: "岗位职责与简历要点。" });
+      for (let i = 0; i < 3; i++)
+        addGlobal(home, { id: `20251231-99970${i}-en0${i}`, subject: `英文内容站${i}`, body: `英文站点记录${i}。` });
+      addFillers(home, 36);
+      const L = await load(home, AUTO_OFF);
+      const filtered = await recallOf(L, "英文 岗位");
+      ok("被过滤的「英文」不计入命中数", filtered === "", filtered.slice(0, 80));
+      const two = await recallOf(L, "岗位简历");
+      ok("2 个有效词元命中仍召回", two.includes("岗位职责与简历"), two.slice(0, 100));
+      ok("只命中岗位的条目不召回", !two.includes("英文岗位说明"), two.slice(0, 100));
+      return;
+    }
+    case "recall-ascii-short": {
+      // 2 字母技术缩写（ai/ci/pr/ui/db/ss）走白名单进索引；非白名单的 2 字母词（qa/is/to）仍被丢弃
+      addGlobal(home, { id: "20251231-999801-sh01", subject: "PR 评审流程", body: "PR 评审流程与合并约定。" });
+      addGlobal(home, { id: "20251231-999802-sh02", subject: "AI 配图规范", body: "AI 配图规范：白底、WebP、1200 宽。" });
+      addGlobal(home, { id: "20251231-999803-sh03", subject: "CI 失败排查", body: "CI 失败排查步骤。" });
+      addGlobal(home, { id: "20251231-999804-sh04", subject: "DB 迁移脚本", body: "DB 迁移脚本按版本号排序。" });
+      addGlobal(home, { id: "20251231-999805-sh05", subject: "QA 检查清单", body: "QA 检查清单（无白名单，qa 不进索引）。" });
+      addFillers(home, 40);
+      const L = await load(home, AUTO_OFF);
+      const pr = await recallOf(L, "PR 评审");
+      ok("2 字母白名单 pr 可召回", pr.includes("PR 评审流程"), pr.slice(0, 100));
+      const ai = await recallOf(L, "AI 配图");
+      ok("2 字母白名单 ai 可召回", ai.includes("AI 配图规范"), ai.slice(0, 100));
+      const ci = await recallOf(L, "CI 失败");
+      ok("2 字母白名单 ci 可召回", ci.includes("CI 失败排查"), ci.slice(0, 100));
+      const db = await recallOf(L, "DB 迁移");
+      ok("2 字母白名单 db 可召回", db.includes("DB 迁移脚本"), db.slice(0, 100));
+      const qa = await recallOf(L, "QA 检查");
+      ok("非白名单 2 字母词不进索引（只剩中文单命中，不召回）", qa === "", qa.slice(0, 80));
+      return;
+    }
+    case "miss-log": {
+      const L = await load(home, AUTO_OFF);
+      const ctx = mkCtx("/work/acme");
+      const miss = () => read(home, "miss.log").split("\n").filter(Boolean);
+      out(await L.call("living_memory", { source: "entries", query: "测试决策甲" }, ctx));
+      ok("命中不写 miss.log", !exists(home, "miss.log"), `${miss().length} 行`);
+      out(await L.call("living_memory", { source: "entries", query: "完全不存在的词" }, ctx));
+      const one = miss();
+      ok("零命中写一行", one.length === 1, `${one.length} 行`);
+      ok("行含 ISO 时间 / q / cwd / scope", /^\d{4}-\d{2}-\d{2}T[^|]+\| q=完全不存在的词 \| cwd=acme \| scope=-$/.test(one[0] ?? ""), (one[0] ?? "").slice(0, 120));
+      out(await L.call("living_memory", { source: "entries", query: "缺口的词", scope: "project:acme" }, ctx));
+      ok("scope 参数写进日志", miss()[1]?.includes("scope=project:acme"), (miss()[1] ?? "").slice(0, 120));
+      out(await L.call("living_memory", { source: "entries", query: "甲" }, ctx));
+      ok("单字符不记", miss().length === 2, `${miss().length} 行`);
+      out(await L.call("living_memory", { source: "entries", query: "测试约束乙", scope: "project:acme" }, ctx));
+      ok("scope 过滤能命中且不记", miss().length === 2, `${miss().length} 行`);
+      process.env.LIVING_MEMORY_MISS_LOG = "0";
+      out(await L.call("living_memory", { source: "entries", query: "关闭后的缺口词" }, ctx));
+      ok("LIVING_MEMORY_MISS_LOG=0 完全不写", miss().length === 2, `${miss().length} 行`);
+      delete process.env.LIVING_MEMORY_MISS_LOG;
+      fs.writeFileSync(path.join(mem(home), "miss.log"), Array.from({ length: 205 }, (_, i) => `line ${i}`).join("\n") + "\n");
+      out(await L.call("living_memory", { source: "entries", query: "触发截断的词" }, ctx));
+      const trimmed = miss();
+      ok("超 200 行截断为最后 200", trimmed.length === 200, `${trimmed.length} 行`);
+      ok("新行保留在末尾", trimmed[199]?.includes("q=触发截断的词"), (trimmed[199] ?? "").slice(0, 80));
       return;
     }
     case "negation": {
