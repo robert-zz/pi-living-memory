@@ -570,6 +570,268 @@ class FileEntryStore implements EntryStore {
 }
 const entryStore: EntryStore = new FileEntryStore();
 
+/** 待办行命中：idx 是 todo.md 行下标（面板与按下标改写都用它） */
+type TodoMatch = { idx: number; line: string; done: boolean };
+/** insert 结果：no-file=todo.md 缺失或为空；no-section 带现有小节名，文案由调用方拼 */
+type TodoInsertResult =
+  | { inserted: true }
+  | { inserted: false; reason: "no-file" | "no-section"; sections: string[] };
+
+/**
+ * todo.md / todo-archive.md / todo-index.json 的存储接口：策略层只经它读写待办，不直接碰 fs 与派生索引。
+ * 锁不在这里：withFileLockSync 仍包在 lockedTodoXxx 的「读—改—写」整段，store 方法的读写粒度与收口前一致
+ * （挪锁进 store 会改变并发语义）。文案（含多命中歧义提示）留在策略层，store 只回命中行与改写结果。
+ */
+interface TodoStore {
+  /** todo.md 全文（mtime+size 戳缓存）；文件不存在时返回 null（空文件返回 ""：检索文案要区分两者） */
+  text(): string | null;
+  /** todo.md 行（文件不存在时为空数组） */
+  lines(): string[];
+  /** 未完成目录（节名 + 正文前 100 字 + @project/#tag/due，done=已完成条数）：简报/面板/计数读它，不读全文 */
+  index(): { open: TodoRow[]; done: number };
+  /** 逾期 / 今天 / 7 日内到期的未完成待办（简报与开屏提示读它） */
+  dueRows(): TodoRow[];
+  /** 整篇改写 todo.md（writeAtomic），写后全文缓存与目录索引同时失效 */
+  write(lines: string[]): void;
+  /** 按正文关键词定位（大小写不敏感子串），未完成项优先；idx 是 todo.md 行下标 */
+  matches(match: string): TodoMatch[];
+  /** 插入一条完整待办行：给了 section 就插到该节最后一条待办之后，否则插到最后一条待办之后；不写盘的原因由调用方拼文案 */
+  insert(line: string, section?: string): TodoInsertResult;
+  /** 按下标勾选/取消（面板行下标）：返回改写后的整行；该行不是待办条目时返回 null（不写盘） */
+  setDoneAt(idx: number, done: boolean): string | null;
+  /** 按下标改写正文（保留勾选状态与 done 标记）：返回改写后的整行；该行不是待办条目时返回 null */
+  editAt(idx: number, body: string): string | null;
+  /** 按下标删除：返回被删的整行；该行不是待办条目时返回 null */
+  deleteAt(idx: number): string | null;
+  /** 已完成项搬进 todo-archive.md（按 done 日期倒序、按完成月份分节），返回搬动条数（审计口径不变） */
+  archiveDone(): number;
+  /** todo-archive.md 全文（带关键词检索用：没 query 就不读它）；读失败返回 "" */
+  archiveText(): string;
+  /** todo-archive.md 行（/memory todo 的归档视图用；读失败为空数组） */
+  archiveLines(): string[];
+}
+
+class FileTodoStore implements TodoStore {
+  /** todo.md 全文缓存：简报 + 面板 + 计数共用一次读盘；戳=mtime+体积，写后立即失效 */
+  private textCache: { stamp: string; text: string } | null = null;
+  /** 未完成目录缓存：与全文同口径（戳不符才扫一遍 todo.md 重建 todo-index.json） */
+  private idxCache: { stamp: string; open: TodoRow[]; done: number } | null = null;
+
+  text(): string | null {
+    let stamp = "";
+    try {
+      const st = fs.statSync(TODO_FILE);
+      stamp = `${st.mtimeMs}|${st.size}`;
+    } catch {
+      return null;
+    }
+    if (this.textCache && this.textCache.stamp === stamp) return this.textCache.text;
+    const text = fs.readFileSync(TODO_FILE, "utf8");
+    this.textCache = { stamp, text };
+    return text;
+  }
+
+  lines(): string[] {
+    const text = this.text();
+    return text ? text.split("\n") : [];
+  }
+
+  index(): { open: TodoRow[]; done: number } {
+    const stamp = this.stamp();
+    if (!stamp) return { open: [], done: 0 };
+    if (this.idxCache && this.idxCache.stamp === stamp) return this.idxCache;
+    try {
+      const raw = JSON.parse(fs.readFileSync(TODO_INDEX_FILE, "utf8"));
+      if (raw?.v === IDX_VERSION && raw?.stamp === stamp && Array.isArray(raw.open)) {
+        this.idxCache = { stamp, open: raw.open as TodoRow[], done: Number(raw.done ?? 0) };
+        return this.idxCache;
+      }
+    } catch {
+      /* 缺失/损坏 → 重建 */
+    }
+    const built = this.buildRows();
+    this.idxCache = { stamp, ...built };
+    writeAtomic(TODO_INDEX_FILE, JSON.stringify({ v: IDX_VERSION, stamp, ...built }));
+    return this.idxCache;
+  }
+
+  dueRows(): TodoRow[] {
+    return this.index().open.filter((r) => {
+      const s = dueState(r.due);
+      return s === "overdue" || s === "today" || s === "soon";
+    });
+  }
+
+  write(lines: string[]): void {
+    ensureDirs();
+    writeAtomic(TODO_FILE, lines.join("\n"));
+    this.textCache = null;
+    this.idxCache = null; // 目录索引同时失效
+  }
+
+  matches(match: string): TodoMatch[] {
+    const m = match.trim().toLowerCase();
+    if (!m) return [];
+    return this.lines()
+      .map((line, idx) => ({ idx, line, mm: TODO_LINE_RE.exec(line) }))
+      .filter((r) => r.mm && r.line.toLowerCase().includes(m))
+      .map((r) => ({ idx: r.idx, line: r.line, done: r.mm![1] !== " " }))
+      .sort((a, b) => Number(a.done) - Number(b.done) || a.idx - b.idx);
+  }
+
+  insert(line: string, section?: string): TodoInsertResult {
+    const lines = this.lines();
+    if (!lines.length) return { inserted: false, reason: "no-file", sections: [] };
+    if (section) {
+      const from = lines.findIndex(
+        (l) => l.startsWith("## ") && l.toLowerCase().includes(section.trim().toLowerCase()),
+      );
+      if (from < 0)
+        return {
+          inserted: false,
+          reason: "no-section",
+          sections: lines.filter((l) => l.startsWith("## ")).map((l) => l.slice(3)),
+        };
+      let at = -1;
+      for (let i = from + 1; i < lines.length && !lines[i].startsWith("## "); i++) if (TODO_LINE_RE.test(lines[i])) at = i;
+      if (at < 0) lines.splice(from + 1, 0, "", line);
+      else lines.splice(at + 1, 0, line);
+    } else {
+      let at = -1;
+      for (let i = 0; i < lines.length; i++) if (TODO_LINE_RE.test(lines[i])) at = i;
+      if (at < 0) lines.push(line);
+      else lines.splice(at + 1, 0, line);
+    }
+    this.write(lines);
+    return { inserted: true };
+  }
+
+  setDoneAt(idx: number, done: boolean): string | null {
+    const lines = this.lines();
+    const line = lines[idx] ?? "";
+    if (!TODO_LINE_RE.test(line)) return null;
+    const body = line.replace(DONE_MARK_RE, "").replace(/^- \[([ xX])\] /, "");
+    lines[idx] = done ? `- [x] ${body} <!-- done: ${new Date().toISOString().slice(0, 10)} -->` : `- [ ] ${body}`;
+    this.write(lines);
+    return lines[idx];
+  }
+
+  editAt(idx: number, body: string): string | null {
+    const lines = this.lines();
+    const mm = TODO_LINE_RE.exec(lines[idx] ?? "");
+    if (!mm) return null;
+    const done = mm[1] !== " ";
+    const doneMark = done ? (lines[idx].match(/<!-- done: [^>]+ -->/)?.[0] ?? "") : "";
+    const kept = doneMark ? ` ${doneMark}` : "";
+    lines[idx] = `- [${done ? "x" : " "}] ${body}${kept}`;
+    this.write(lines);
+    return lines[idx];
+  }
+
+  deleteAt(idx: number): string | null {
+    const lines = this.lines();
+    if (!TODO_LINE_RE.test(lines[idx] ?? "")) return null;
+    const removed = lines.splice(idx, 1)[0];
+    this.write(lines);
+    return removed ?? null;
+  }
+
+  archiveDone(): number {
+    const lines = this.lines();
+    const done: string[] = [];
+    const rest: string[] = [];
+    for (const l of lines) {
+      if (l.startsWith("- [x] ")) {
+        done.push(l);
+        continue;
+      }
+      rest.push(l);
+    }
+    if (!done.length) return 0;
+    const dateOf = (l: string) => (l.match(/<!-- done: ([^>]+) -->/)?.[1] ?? "").trim();
+    done.sort((a, b) => (dateOf(a) < dateOf(b) ? 1 : -1));
+
+    // 完成项移出 todo.md 存到 todo-archive.md：todo.md 只留未完成 + 一个指针节，
+    // 这样简报每轮读的待办文本量与「还剩多少活」成正比，而不是与历史总量成正比
+    const month = today().slice(0, 7);
+    const head = `# todo-archive —— 已完成的待办（按完成月份倒序）\n\n## 已归档（${month}）\n\n`;
+    let arch = "";
+    try {
+      arch = fs.readFileSync(TODO_ARCHIVE_FILE, "utf8");
+    } catch {
+      arch = head;
+    }
+    const monthHead = `## 已归档（${month}）`;
+    arch = arch.includes(monthHead)
+      ? arch.replace(`${monthHead}\n\n`, `${monthHead}\n\n${done.join("\n")}\n`)
+      : `${arch.trimEnd()}\n\n${monthHead}\n\n${done.join("\n")}\n`;
+    fs.mkdirSync(path.dirname(TODO_ARCHIVE_FILE), { recursive: true });
+    writeAtomic(TODO_ARCHIVE_FILE, arch);
+
+    const total = (arch.match(/^- \[x\] /gm) ?? []).length;
+    const at = rest.findIndex((l) => l.trim() === ARCHIVE_SECTION);
+    const pointer = `- 历史上已完成的 ${total} 项已移入 \`todo-archive.md\`（按月份归档，可 grep）`;
+    if (at < 0) {
+      while (rest.length && rest[rest.length - 1].trim() === "") rest.pop();
+      rest.push("", ARCHIVE_SECTION, "", pointer);
+    } else {
+      let i = at + 1;
+      while (i < rest.length && rest[i].trim() === "") i++;
+      while (i < rest.length && rest[i].startsWith("- ")) i++; // 清掉旧的清单指针
+      rest.splice(i, 0, pointer);
+    }
+    this.write(rest);
+    logActivity(`todo archive moved=${done.length} total=${total} file=todo-archive.md`);
+    return done.length;
+  }
+
+  archiveText(): string {
+    try {
+      return fs.readFileSync(TODO_ARCHIVE_FILE, "utf8");
+    } catch {
+      return "";
+    }
+  }
+
+  archiveLines(): string[] {
+    const text = this.archiveText();
+    return text ? text.split("\n") : [];
+  }
+
+  /** todo.md 的 mtime+体积戳：全文缓存与目录索引共用的失效口径 */
+  private stamp(): string {
+    try {
+      const st = fs.statSync(TODO_FILE);
+      return `${st.mtimeMs}|${st.size}`;
+    } catch {
+      return "";
+    }
+  }
+
+  /** 戳不符时从 todo.md 重建目录并落盘 */
+  private buildRows(): { open: TodoRow[]; done: number } {
+    const open: TodoRow[] = [];
+    let done = 0;
+    let section = "";
+    for (const line of fs.readFileSync(TODO_FILE, "utf8").split("\n")) {
+      if (line.startsWith("## ")) {
+        section = line.slice(3).trim();
+        continue;
+      }
+      if (line.startsWith("- [x] ")) {
+        done++;
+        continue;
+      }
+      if (!line.startsWith("- [ ] ")) continue;
+      if (!line.startsWith("- [ ] ")) continue;
+      const meta = parseTodoMeta(line.slice(6).replace(/<!--.*$/, "").trim());
+      open.push({ section, text: meta.text.slice(0, 100), project: meta.project, tags: meta.tags, due: meta.due });
+    }
+    return { open, done };
+  }
+}
+const todoStore: TodoStore = new FileTodoStore();
+
 /** @deprecated 内部请用 entryStore.list()（只读索引行，不读正文） */
 function loadEntriesIndex(): EntryIndex[] {
   return entryStore.list();
@@ -1321,24 +1583,15 @@ function briefLine(tag: string, e: EntryIndex): string {
   return `${tag}${subject}：${body.length > room ? `${body.slice(0, room)}…` : body}`;
 }
 
-// todo.md 全文缓存：简报 + 面板 + 计数共用一次读盘；戳=mtime+体积，写后立即失效
-let todoCache: { stamp: string; text: string } | null = null;
+// todo.md 的全文缓存 / 计数 / 改写都在 FileTodoStore（见上），这里只留旧口径的薄包装
+/** @deprecated 内部请用 todoStore.text() */
 function todoText(): string {
-  let stamp = "";
-  try {
-    const st = fs.statSync(TODO_FILE);
-    stamp = `${st.mtimeMs}|${st.size}`;
-  } catch {
-    return "";
-  }
-  if (todoCache && todoCache.stamp === stamp) return todoCache.text;
-  const text = fs.readFileSync(TODO_FILE, "utf8");
-  todoCache = { stamp, text };
-  return text;
+  return todoStore.text() ?? "";
 }
 
+/** @deprecated 内部请用 todoStore.index().open.length */
 function todoOpenCount(): number {
-  return todoIndex().open.length;
+  return todoStore.index().open.length;
 }
 
 /** 待办条目标识：`- [ ] 正文` / `- [x] 正文`（正文可很长，含 `<!-- from: ... -->` 尾注） */
@@ -1346,24 +1599,19 @@ const TODO_LINE_RE = /^- \[([ xX])\] (.+)$/;
 const ARCHIVE_SECTION = "## 已完成归档";
 const DONE_MARK_RE = /\s*<!-- done: [^>]*-->[ \t]*$/;
 
+/** @deprecated 内部请用 todoStore.lines() */
 function todoLines(): string[] {
-  const text = todoText();
-  return text ? text.split("\n") : [];
+  return todoStore.lines();
 }
 
+/** @deprecated 内部请用 todoStore.archiveLines() */
 function todoArchiveLines(): string[] {
-  try {
-    return fs.readFileSync(TODO_ARCHIVE_FILE, "utf8").split("\n");
-  } catch {
-    return [];
-  }
+  return todoStore.archiveLines();
 }
 
+/** @deprecated 内部请用 todoStore.write(lines) */
 function saveTodoLines(lines: string[]): void {
-  ensureDirs();
-  writeAtomic(TODO_FILE, lines.join("\n"));
-  todoCache = null;
-  todoIdxCache = null; // 目录索引同时失效
+  todoStore.write(lines);
 }
 
 // ---------- todo 索引（派生：只存未完成项的节名 + 正文前 100 字）----------
@@ -1435,63 +1683,14 @@ function dueState(due?: string): DueState {
   return "later";
 }
 
-/** 逾期 / 今天 / 7 日内到期的未完成待办（简报与开屏提示读它） */
+/** @deprecated 内部请用 todoStore.dueRows() */
 function dueRows(): TodoRow[] {
-  return todoIndex().open.filter((r) => {
-    const s = dueState(r.due);
-    return s === "overdue" || s === "today" || s === "soon";
-  });
-}
-let todoIdxCache: { stamp: string; open: TodoRow[]; done: number } | null = null;
-
-const todoStamp = (): string => {
-  try {
-    const st = fs.statSync(TODO_FILE);
-    return `${st.mtimeMs}|${st.size}`;
-  } catch {
-    return "";
-  }
-};
-
-function buildTodoRows(): { open: TodoRow[]; done: number } {
-  const open: TodoRow[] = [];
-  let done = 0;
-  let section = "";
-  for (const line of fs.readFileSync(TODO_FILE, "utf8").split("\n")) {
-    if (line.startsWith("## ")) {
-      section = line.slice(3).trim();
-      continue;
-    }
-    if (line.startsWith("- [x] ")) {
-      done++;
-      continue;
-    }
-    if (!line.startsWith("- [ ] ")) continue;
-    if (!line.startsWith("- [ ] ")) continue;
-    const meta = parseTodoMeta(line.slice(6).replace(/<!--.*$/, "").trim());
-    open.push({ section, text: meta.text.slice(0, 100), project: meta.project, tags: meta.tags, due: meta.due });
-  }
-  return { open, done };
+  return todoStore.dueRows();
 }
 
-/** 未完成待办目录：简报/面板/计数读它，不再读 todo.md 全文（写操作照旧用全文） */
+/** @deprecated 目录缓存/重建在 FileTodoStore（stamp 同节）；这里保留旧读法 */
 function todoIndex(): { open: TodoRow[]; done: number } {
-  const stamp = todoStamp();
-  if (!stamp) return { open: [], done: 0 };
-  if (todoIdxCache && todoIdxCache.stamp === stamp) return todoIdxCache;
-  try {
-    const raw = JSON.parse(fs.readFileSync(TODO_INDEX_FILE, "utf8"));
-    if (raw?.v === IDX_VERSION && raw?.stamp === stamp && Array.isArray(raw.open)) {
-      todoIdxCache = { stamp, open: raw.open as TodoRow[], done: Number(raw.done ?? 0) };
-      return todoIdxCache;
-    }
-  } catch {
-    /* 缺失/损坏 → 重建 */
-  }
-  const built = buildTodoRows();
-  todoIdxCache = { stamp, ...built };
-  writeAtomic(TODO_INDEX_FILE, JSON.stringify({ v: IDX_VERSION, stamp, ...built }));
-  return todoIdxCache;
+  return todoStore.index();
 }
 
 // ---------- summary.md 写入 ----------
@@ -1735,7 +1934,7 @@ function searchSummaryArchive(q: string, limit = 8): string {
 function todoDigest(baseName: string, limit: number): Array<{ section: string; text: string }> {
   const out: Array<{ section: string; text: string }> = [];
   const want = baseName.toLowerCase();
-  for (const row of todoIndex().open) {
+  for (const row of todoStore.index().open) {
     if (!row.section.toLowerCase().includes(want)) continue;
     out.push({
       section: row.section.slice(0, 18),
@@ -1747,70 +1946,14 @@ function todoDigest(baseName: string, limit: number): Array<{ section: string; t
 }
 
 function todoSummaryText(): string {
-  const idx = todoIndex();
+  const idx = todoStore.index();
   const done = idx.done;
   return `未完成 ${idx.open.length} 项${done ? ` / todo.md 内已完成 ${done} 项` : ""}`;
 }
 
-/** 把已完成待办收拢到文末「## 已完成归档」，按 done 日期倒序；返回搬动条数 */
+/** @deprecated 内部请用 todoStore.archiveDone()（含写入与审计） */
 function archiveDone(): number {
-  const lines = todoLines();
-  const done: string[] = [];
-  const rest: string[] = [];
-  for (const l of lines) {
-    if (l.startsWith("- [x] ")) {
-      done.push(l);
-      continue;
-    }
-    rest.push(l);
-  }
-  if (!done.length) return 0;
-  const dateOf = (l: string) => (l.match(/<!-- done: ([^>]+) -->/)?.[1] ?? "").trim();
-  done.sort((a, b) => (dateOf(a) < dateOf(b) ? 1 : -1));
-
-  // 完成项移出 todo.md 存到 todo-archive.md：todo.md 只留未完成 + 一个指针节，
-  // 这样简报每轮读的待办文本量与「还剩多少活」成正比，而不是与历史总量成正比
-  const month = today().slice(0, 7);
-  const head = `# todo-archive —— 已完成的待办（按完成月份倒序）\n\n## 已归档（${month}）\n\n`;
-  let arch = "";
-  try {
-    arch = fs.readFileSync(TODO_ARCHIVE_FILE, "utf8");
-  } catch {
-    arch = head;
-  }
-  const monthHead = `## 已归档（${month}）`;
-  arch = arch.includes(monthHead)
-    ? arch.replace(`${monthHead}\n\n`, `${monthHead}\n\n${done.join("\n")}\n`)
-    : `${arch.trimEnd()}\n\n${monthHead}\n\n${done.join("\n")}\n`;
-  fs.mkdirSync(path.dirname(TODO_ARCHIVE_FILE), { recursive: true });
-  writeAtomic(TODO_ARCHIVE_FILE, arch);
-
-  const total = (arch.match(/^- \[x\] /gm) ?? []).length;
-  const at = rest.findIndex((l) => l.trim() === ARCHIVE_SECTION);
-  const pointer = `- 历史上已完成的 ${total} 项已移入 \`todo-archive.md\`（按月份归档，可 grep）`;
-  if (at < 0) {
-    while (rest.length && rest[rest.length - 1].trim() === "") rest.pop();
-    rest.push("", ARCHIVE_SECTION, "", pointer);
-  } else {
-    let i = at + 1;
-    while (i < rest.length && rest[i].trim() === "") i++;
-    while (i < rest.length && rest[i].startsWith("- ")) i++; // 清掉旧的清单指针
-    rest.splice(i, 0, pointer);
-  }
-  saveTodoLines(rest);
-  logActivity(`todo archive moved=${done.length} total=${total} file=todo-archive.md`);
-  return done.length;
-}
-
-/** 正文命中（大小写不敏感子串）；未完成项优先 */
-function todoMatches(match: string): Array<{ idx: number; line: string; done: boolean }> {
-  const m = match.trim().toLowerCase();
-  if (!m) return [];
-  return todoLines()
-    .map((line, idx) => ({ idx, line, mm: TODO_LINE_RE.exec(line) }))
-    .filter((r) => r.mm && r.line.toLowerCase().includes(m))
-    .map((r) => ({ idx: r.idx, line: r.line, done: r.mm![1] !== " " }))
-    .sort((a, b) => Number(a.done) - Number(b.done) || a.idx - b.idx);
+  return todoStore.archiveDone();
 }
 
 function shortTodo(line: string, n = 80): string {
@@ -1831,44 +1974,27 @@ function opTodoAdd(text: string, section?: string, project?: string, tags?: stri
   };
   if (merged.due && !/^\d{4}-\d{2}-\d{2}$/.test(merged.due))
     return `due 需要 YYYY-MM-DD（收到「${merged.due}」）。`;
-  const lines = todoLines();
-  if (!lines.length) return "（todo.md 不存在）";
   const item = `- [ ] ${body}${todoSuffix(merged.project, [...new Set(merged.tags)], merged.due)}`;
-  if (section) {
-    const from = lines.findIndex(
-      (l) => l.startsWith("## ") && l.toLowerCase().includes(section.trim().toLowerCase()),
-    );
-    if (from < 0)
-      return `找不到小节「${section}」；现有小节：${lines.filter((l) => l.startsWith("## ")).map((l) => l.slice(3)).join(" / ")}`;
-    let at = -1;
-    for (let i = from + 1; i < lines.length && !lines[i].startsWith("## "); i++) if (TODO_LINE_RE.test(lines[i])) at = i;
-    if (at < 0) lines.splice(from + 1, 0, "", item);
-    else lines.splice(at + 1, 0, item);
-  } else {
-    let at = -1;
-    for (let i = 0; i < lines.length; i++) if (TODO_LINE_RE.test(lines[i])) at = i;
-    if (at < 0) lines.push(item);
-    else lines.splice(at + 1, 0, item);
+  const res = todoStore.insert(item, section);
+  if (!res.inserted) {
+    if (res.reason === "no-file") return "（todo.md 不存在）";
+    return `找不到小节「${section}」；现有小节：${res.sections.join(" / ")}`;
   }
-  saveTodoLines(lines);
   logActivity(`todo_add ${body.slice(0, 60)}`);
   return `已加入待办：${shortTodo(item)}\ntodo.md：${todoSummaryText()}`;
 }
 
-/** 面板用：按 todo.md 行下标直接勾选/取消（下标取自 todoMatches 或同一次渲染） */
+/** 面板用：按 todo.md 行下标直接勾选/取消（下标取自 todoStore.matches 或同一次渲染） */
 function opTodoToggleAt(idx: number, done: boolean): string {
-  const lines = todoLines();
-  const line = lines[idx] ?? "";
-  if (!TODO_LINE_RE.test(line)) return `${idx} 行不是待办条目（可能已被其他会话改动，请重开面板）`;
+  const line = todoStore.setDoneAt(idx, done);
+  if (line === null) return `${idx} 行不是待办条目（可能已被其他会话改动，请重开面板）`;
   const body = line.replace(DONE_MARK_RE, "").replace(/^- \[([ xX])\] /, "");
-  lines[idx] = done ? `- [x] ${body} <!-- done: ${new Date().toISOString().slice(0, 10)} -->` : `- [ ] ${body}`;
-  saveTodoLines(lines);
   logActivity(`todo_${done ? "done" : "undo"}@L${idx} ${body.slice(0, 60)}`);
-  return `${done ? "已勾选完成" : "已恢复未完成"}：${shortTodo(lines[idx])}\ntodo.md：${todoSummaryText()}`;
+  return `${done ? "已勾选完成" : "已恢复未完成"}：${shortTodo(line)}\ntodo.md：${todoSummaryText()}`;
 }
 
 function opTodoSet(match: string, done: boolean): string {
-  const hits = todoMatches(match);
+  const hits = todoStore.matches(match);
   if (!hits.length) return `todo.md 里没有命中「${match}」的待办`;
   const togglable = hits.filter((h) => h.done !== done);
   if (!togglable.length)
@@ -1876,43 +2002,36 @@ function opTodoSet(match: string, done: boolean): string {
   if (togglable.length > 1)
     return `命中 ${togglable.length} 项，请换更具体的关键词（未改动任何条目）：\n${togglable.slice(0, 8).map((h) => `· ${shortTodo(h.line, 100)}`).join("\n")}`;
   const target = togglable[0];
-  const lines = todoLines();
-  const body = target.line.replace(DONE_MARK_RE, "").replace(/^- \[[ xX]\] /, "");
-  lines[target.idx] = done
-    ? `- [x] ${body} <!-- done: ${new Date().toISOString().slice(0, 10)} -->`
-    : `- [ ] ${body}`;
-  saveTodoLines(lines);
+  const line = todoStore.setDoneAt(target.idx, done);
+  if (line === null) return `${target.idx} 行不是待办条目（可能已被其他会话改动，请重开面板）`;
+  const body = line.replace(DONE_MARK_RE, "").replace(/^- \[([ xX])\] /, "");
   logActivity(`todo_${done ? "done" : "undo"} ${body.slice(0, 60)}`);
-  return `${done ? "已勾选完成" : "已恢复未完成"}：${shortTodo(lines[target.idx])}\ntodo.md：${todoSummaryText()}`;
+  return `${done ? "已勾选完成" : "已恢复未完成"}：${shortTodo(line)}\ntodo.md：${todoSummaryText()}`;
 }
 
 /** 按唯一命中改写待办正文（保留勾选状态与 done 标记） */
 function opTodoEdit(match: string, text: string): string {
   const body = text.replace(/\s+/g, " ").trim();
   if (!body) return "todo_edit 需要 text（新的待办正文）。";
-  const hits = todoMatches(match);
+  const hits = todoStore.matches(match);
   if (!hits.length) return `todo.md 里没有命中「${match}」的待办`;
   if (hits.length > 1)
     return `命中 ${hits.length} 项，请换更具体的关键词（未改动任何条目）：\n${hits.slice(0, 8).map((h) => `· ${shortTodo(h.line, 100)}`).join("\n")}`;
   const target = hits[0];
-  const lines = todoLines();
-  const doneMark = target.done ? (lines[target.idx].match(/<!-- done: [^>]+ -->/)?.[0] ?? "") : "";
-  const kept = doneMark ? ` ${doneMark}` : "";
-  lines[target.idx] = `- [${target.done ? "x" : " "}] ${body}${kept}`;
-  saveTodoLines(lines);
+  const line = todoStore.editAt(target.idx, body);
+  if (line === null) return `${target.idx} 行不是待办条目（可能已被其他会话改动，请重开面板）`;
   logActivity(`todo_edit@L${target.idx} ${body.slice(0, 60)}`);
-  return `已改写待办：${shortTodo(lines[target.idx])}\ntodo.md：${todoSummaryText()}`;
+  return `已改写待办：${shortTodo(line)}\ntodo.md：${todoSummaryText()}`;
 }
 /** 按唯一命中删除待办行 */
 function opTodoDelete(match: string): string {
-  const hits = todoMatches(match);
+  const hits = todoStore.matches(match);
   if (!hits.length) return `todo.md 里没有命中「${match}」的待办`;
   if (hits.length > 1)
     return `命中 ${hits.length} 项，请换更具体的关键词（未删除任何条目）：\n${hits.slice(0, 8).map((h) => `· ${shortTodo(h.line, 100)}`).join("\n")}`;
   const target = hits[0];
-  const lines = todoLines();
-  const removed = lines.splice(target.idx, 1)[0];
-  saveTodoLines(lines);
+  const removed = todoStore.deleteAt(target.idx);
+  if (removed === null) return `${target.idx} 行不是待办条目（可能已被其他会话改动，请重开面板）`;
   logActivity(`todo_delete@L${target.idx} ${shortTodo(removed, 60)}`);
   return `已删除待办：${shortTodo(removed)}\ntodo.md：${todoSummaryText()}`;
 }
@@ -1934,7 +2053,7 @@ function lockedTodoDelete(match: string): string {
   return withFileLockSync(TODO_FILE, () => opTodoDelete(match));
 }
 function lockedArchiveDone(): number {
-  return withFileLockSync(TODO_FILE, () => archiveDone());
+  return withFileLockSync(TODO_FILE, () => todoStore.archiveDone());
 }
 function lockedSummaryAdd(project: string, title: string, body: string): string {
   return withFileLockSync(SUMMARY_FILE, () => opSummaryAdd(project, title, body));
@@ -2026,22 +2145,10 @@ function searchEntries(q: string, p: EntrySearchParams, cwd?: string): string {
 }
 
 function searchTodos(q: string): string {
-  let text = "";
-  try {
-    text = fs.readFileSync(TODO_FILE, "utf8");
-  } catch {
-    return "（todo.md 不存在）";
-  }
+  const text = todoStore.text();
+  if (text === null) return "（todo.md 不存在）";
   // 归档项只在带关键词时才读（否则等于把历史支出重新搬回来）
-  const archText = q
-    ? (() => {
-        try {
-          return fs.readFileSync(TODO_ARCHIVE_FILE, "utf8");
-        } catch {
-          return "";
-        }
-      })()
-    : "";
+  const archText = q ? todoStore.archiveText() : "";
   const own = text.split("\n").filter((l) => l.startsWith("- [ ] ") || l.startsWith("- [x] "));
   const open = own.filter((l) => l.startsWith("- [ ] "));
   const archived = archText.split("\n").filter((l) => l.startsWith("- [x] "));
@@ -2486,7 +2593,7 @@ function buildBrief(cwd?: string, query?: string): string {
     }
   }
   if (!lines.length) return "";
-  const openTodos = todoOpenCount();
+  const openTodos = todoStore.index().open.length;
   // 当前项目节的未完成待办摘 2 条（内容不塞进 entries，只做行内提醒）
   if (base && used + TODO_DIGEST_RESERVE <= BRIEF_MAX_CHARS) {
     for (const t of todoDigest(base, 2)) {
@@ -2498,7 +2605,7 @@ function buildBrief(cwd?: string, query?: string): string {
   }
 
   // 到期提醒：逾期 / 今天 / 7 日内（跨项目，最多 3 条）
-  const dueTodo = dueRows();
+  const dueTodo = todoStore.dueRows();
   if (dueTodo.length) {
     const show = dueTodo.slice(0, 3);
     const line = `待办到期：${show
@@ -2543,7 +2650,7 @@ function buildBrief(cwd?: string, query?: string): string {
   }
 
   const shownNote = `${lines.length}/${visible.length}${dropped ? `（${dropped} 条未显示，用 living_memory 查全文）` : ""}`;
-  const dueTodoCount = dueRows().length;
+  const dueTodoCount = todoStore.dueRows().length;
   const tail = `\n（活动 ${active.length} · 到期 ${due.length} · 待确认 ${pending.length} · 简报 ${shownNote}${openTodos ? ` · 待办 ${openTodos} 项` : ""}${dueTodoCount ? ` · 待办到期 ${dueTodoCount} 项` : ""} — 检索 source=todo/summary/entries；治理 /memory）`;
   return `\n\n## Living Memory（个人长期记忆层 · Today 契约）\n到期项需处理；[待确认] 是未经确认的推断，只能作弱参考，不得当事实引用。完整正文用 living_memory；纠正用 living_memory_update supersede；工程实况用 living_memory source=summary/todo 检索；待办勾选用 living_memory_update action=todo_done match=唯一关键词。\n${lines.join("\n")}${tail}`;
 }
@@ -3330,7 +3437,7 @@ function refreshProfile(dry = true): string {
         // 已完成条目的取消入口
         let showDone = false;
         for (;;) {
-          const lines = showDone ? todoArchiveLines() : todoLines();
+          const lines = showDone ? todoStore.archiveLines() : todoStore.lines();
           const rows: Array<{ idx: number; label: string }> = [];
           let section = "";
           for (let i = 0; i < lines.length; i++) {
@@ -3366,7 +3473,7 @@ function refreshProfile(dry = true): string {
             continue;
           }
           const title = `${todoSummaryText()}（${showDone ? "已完成" : "未完成"} ${rows.length} 条）——选择要切换状态的条目：`;
-          const doneCount = todoLines().filter((l) => l.startsWith("- [x] ")).length;
+          const doneCount = todoStore.index().done;
           const extras = [showDone ? "看未完成" : "看已完成"];
           if (doneCount) extras.push(`归档已完成（${doneCount} 条）`);
           extras.push("退出");
@@ -3470,9 +3577,9 @@ function refreshProfile(dry = true): string {
         if (twins) hints.push(`发现大写孪生文件 ${twins}（陈旧实例可能又写回来了）：/reload 后人工合并，否则写入会分叉`);
         const pc = entryStore.purgeExpired(30, true);
         if (pc.candidates.length) hints.push(`过期 ${pc.candidates.length} 条可归档（living_memory action=purge_expired 预览）`);
-        const doneTodo = todoIndex().done;
+        const doneTodo = todoStore.index().done;
         if (doneTodo > 0) hints.push(`todo.md 内已完成 ${doneTodo} 项可归档（/memory todo → 归档已完成）`);
-        const dueTodo = dueRows();
+        const dueTodo = todoStore.dueRows();
         if (dueTodo.length) {
           const overdue = dueTodo.filter((r) => dueState(r.due) === "overdue").length;
           hints.push(
