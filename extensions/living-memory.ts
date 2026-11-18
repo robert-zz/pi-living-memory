@@ -283,32 +283,149 @@ const titleOf = (body: string) =>
     .map((l) => l.trim())
     .find((l) => l && !l.startsWith("#"))?.slice(0, 40) ?? "";
 
-/** 索引是派生数据：只存 frontmatter + 标题行，永不作事实源；戳不符就用文件重建 */
-function loadEntriesIndex(): EntryIndex[] {
-  const stamp = dirStamp();
-  if (indexCache && indexCache.stamp === stamp) return indexCache.rows;
-  try {
-    const raw = JSON.parse(fs.readFileSync(INDEX_FILE, "utf8"));
-    // v 不符重建；同版本但没有 toks 的旧行也重建（格式闸门不能只看顶层 v）
-    if (raw?.v === IDX_VERSION && raw?.stamp === stamp && Array.isArray(raw.rows) && raw.rows.every((r: any) => Array.isArray(r?.toks))) {
-      indexCache = { stamp, rows: raw.rows as EntryIndex[] };
-      return indexCache.rows;
+/**
+ * entries 的存储接口：策略层只经它访问条目，不直接碰 fs 与派生索引。
+ * list 与 listFull 是两种口径：list 只回索引行（不读正文，简报/召回必须用它），
+ * listFull 才读正文（面板/冲突自检/全文检索用）；两者各自缓存、各自按目录戳失效。
+ */
+interface EntryStore {
+  /** 索引行（frontmatter + 标题 + 词元）：不读 entries 正文 */
+  list(): EntryIndex[];
+  /** 全量条目（含正文）：会读 entries 正文，简报不要用 */
+  listFull(): Entry[];
+  /** 按 id 前缀定位：先查索引，只解析命中的那 1 个文件；索引落后时回退全扫，最后查 expired/ */
+  get(idPrefix: string): Entry | null;
+  /** 写条目：写到它当前所在目录（entries/ 或 expired/），活动条目同步索引行 */
+  put(e: Entry): void;
+  /** 删除条目：落 recovery 记录、移走 entries/ 或 expired/ 下的文件、同步索引行 */
+  delete(e: Entry, note?: string): void;
+  /** 同 kind+subject 的活动条目里正文相似的那条（先索引筛候选，再只读候选正文） */
+  findConflicting(kind: string, subject: string, text: string): Entry | null;
+  /** 强制从盘重建派生索引并落盘（格式版本不符/损坏时 list 会自动调用） */
+  rebuildIndex(): void;
+  /** entries/ 目录戳（mtime + 文件数）：索引与全量缓存的失效口径 */
+  stamp(): string;
+}
+
+class FileEntryStore implements EntryStore {
+  list(): EntryIndex[] {
+    const stamp = this.stamp();
+    if (indexCache && indexCache.stamp === stamp) return indexCache.rows;
+    try {
+      const raw = JSON.parse(fs.readFileSync(INDEX_FILE, "utf8"));
+      // v 不符重建；同版本但没有 toks 的旧行也重建（格式闸门不能只看顶层 v）
+      if (raw?.v === IDX_VERSION && raw?.stamp === stamp && Array.isArray(raw.rows) && raw.rows.every((r: any) => Array.isArray(r?.toks))) {
+        indexCache = { stamp, rows: raw.rows as EntryIndex[] };
+        return indexCache.rows;
+      }
+    } catch {
+      // 索引缺失/损坏 → 下面重建
     }
-  } catch {
-    // 索引缺失/损坏 → 下面重建
+    return this.buildIndex(stamp);
   }
-  ensureDirs();
-  const rows: EntryIndex[] = [];
-  for (const f of fs.readdirSync(ENTRIES_DIR)) {
-    if (!f.endsWith(".md")) continue;
-    const e = parseEntry(path.join(ENTRIES_DIR, f));
-    if (!e?.meta.id) continue;
-    rows.push(toIndexRow(e.meta, titleOf(e.body)));
+
+  listFull(): Entry[] {
+    const stamp = this.stamp();
+    if (entriesCache && entriesCache.stamp === stamp) return entriesCache.list;
+    ensureDirs();
+    const out: Entry[] = [];
+    for (const f of fs.readdirSync(ENTRIES_DIR)) {
+      if (!f.endsWith(".md")) continue;
+      const e = parseEntry(path.join(ENTRIES_DIR, f));
+      if (e && e.meta.id) out.push(e);
+    }
+    out.sort((a, b) => (a.meta.id < b.meta.id ? 1 : -1));
+    entriesCache = { stamp, list: out };
+    return out;
   }
-  rows.sort((a, b) => (a.id < b.id ? 1 : -1));
-  indexCache = { stamp, rows };
-  writeAtomic(INDEX_FILE, JSON.stringify({ v: IDX_VERSION, stamp, rows }));
-  return rows;
+
+  get(idPrefix: string): Entry | null {
+    const rows = this.list();
+    const hit = rows.find((r) => r.id === idPrefix) ?? rows.find((r) => r.id.startsWith(idPrefix));
+    if (hit) return parseEntry(path.join(ENTRIES_DIR, `${hit.id}.md`));
+    // 索引可能落后于盘（极端并发），兜底全扫一次
+    const live = this.listFull().find((e) => e.meta.id === idPrefix || e.meta.id.startsWith(idPrefix));
+    if (live) return live;
+    // 已失效搬进 expired/ 的条目仍可按 id 定位（renew/delete/restore 要用）
+    if (fs.existsSync(EXPIRED_DIR)) {
+      const f = fs
+        .readdirSync(EXPIRED_DIR)
+        .find((x) => x.endsWith(".md") && !x.startsWith("index-") && (x === `${idPrefix}.md` || x.startsWith(idPrefix)));
+      if (f) return parseEntry(path.join(EXPIRED_DIR, f));
+    }
+    return null;
+  }
+
+  put(e: Entry): void {
+    const { meta, body } = e;
+    ensureDirs();
+    const live = entryPath(meta.id);
+    const cold = path.join(EXPIRED_DIR, `${meta.id}.md`);
+    const target = fs.existsSync(live) || !fs.existsSync(cold) ? live : cold;
+    const order = ["id", "kind", "status", "subject", "scope", "source", "obtained_at", "confirmed_at", "expires_at", "review_after", "confidence", "evidence", "action_impact", "supersedes", "superseded_by"];
+    const fm = order.map((k) => `${k}: ${meta[k] ?? ""}`).join("\n");
+    writeAtomic(target, `---\n${fm}\n---\n${body.trim()}\n`);
+    if (target === live) upsertIndexRow(meta, body);
+    else dropIndexRows([meta.id]);
+  }
+
+  delete(e: Entry, note?: string): void {
+    fs.mkdirSync(RECOVERY_DIR, { recursive: true });
+    fs.writeFileSync(
+      recoveryPath(e.meta.id),
+      JSON.stringify({ meta: e.meta, body: e.body, deleted_at: new Date().toISOString(), note: note ?? "" }, null, 2),
+    );
+    const liveFile = entryPath(e.meta.id);
+    const coldFile = path.join(EXPIRED_DIR, `${e.meta.id}.md`);
+    try {
+      fs.unlinkSync(fs.existsSync(liveFile) ? liveFile : coldFile);
+    } catch {
+      /* 文件可能已被移走，recovery 记录仍有效 */
+    }
+    dropIndexRows([e.meta.id]);
+  }
+
+  findConflicting(kind: string, subject: string, text: string): Entry | null {
+    const want = normText(subject);
+    const cands = this.list().filter(
+      (r) => ACTIVE.has(r.meta.status ?? "") && r.meta.kind === kind && normText(r.meta.subject ?? "") === want,
+    );
+    for (const r of cands) {
+      const e = parseEntry(path.join(ENTRIES_DIR, `${r.id}.md`));
+      if (e && bodySimilar(e.body, text)) return e;
+    }
+    return null;
+  }
+
+  rebuildIndex(): void {
+    this.buildIndex(this.stamp());
+  }
+
+  stamp(): string {
+    return dirStamp();
+  }
+
+  /** 从 entries/ 重建索引行并落盘；stamp 由调用方先取，缓存戳与触发重建的那次读盘一致 */
+  private buildIndex(stamp: string): EntryIndex[] {
+    ensureDirs();
+    const rows: EntryIndex[] = [];
+    for (const f of fs.readdirSync(ENTRIES_DIR)) {
+      if (!f.endsWith(".md")) continue;
+      const e = parseEntry(path.join(ENTRIES_DIR, f));
+      if (!e?.meta.id) continue;
+      rows.push(toIndexRow(e.meta, titleOf(e.body)));
+    }
+    rows.sort((a, b) => (a.id < b.id ? 1 : -1));
+    indexCache = { stamp, rows };
+    writeAtomic(INDEX_FILE, JSON.stringify({ v: IDX_VERSION, stamp, rows }));
+    return rows;
+  }
+}
+const entryStore: EntryStore = new FileEntryStore();
+
+/** @deprecated 内部请用 entryStore.list()（只读索引行，不读正文） */
+function loadEntriesIndex(): EntryIndex[] {
+  return entryStore.list();
 }
 
 /** 索引写盘：stamp 取写盘后的目录戳——跨进程失效靠它，落不准就等下次重建 */
@@ -352,17 +469,9 @@ const invalidateIndex = () => {
   indexCache = null;
 };
 
-/** 写条目：写到它当前所在目录（entries/ 或 expired/），活动条目才更新索引 */
+/** @deprecated 内部请用 entryStore.put({ meta, body }) */
 function writeEntry(meta: Meta, body: string) {
-  ensureDirs();
-  const live = entryPath(meta.id);
-  const cold = path.join(EXPIRED_DIR, `${meta.id}.md`);
-  const target = fs.existsSync(live) || !fs.existsSync(cold) ? live : cold;
-  const order = ["id", "kind", "status", "subject", "scope", "source", "obtained_at", "confirmed_at", "expires_at", "review_after", "confidence", "evidence", "action_impact", "supersedes", "superseded_by"];
-  const fm = order.map((k) => `${k}: ${meta[k] ?? ""}`).join("\n");
-  writeAtomic(target, `---\n${fm}\n---\n${body.trim()}\n`);
-  if (target === live) upsertIndexRow(meta, body);
-  else dropIndexRows([meta.id]);
+  entryStore.put({ meta, body });
 }
 
 /** 失效条目搬进 expired/：离开 entries/ 并同步从索引移除（不删除，restore 可取回） */
@@ -397,43 +506,14 @@ function parseEntry(file: string): Entry | null {
   }
 }
 
+/** @deprecated 内部请用 entryStore.listFull()（会读正文，简报不要用） */
 function listEntries(): Entry[] {
-  const stamp = (() => {
-    try {
-      return `${fs.statSync(ENTRIES_DIR).mtimeMs}|${fs.readdirSync(ENTRIES_DIR).length}`;
-    } catch {
-      return "";
-    }
-  })();
-  if (entriesCache && entriesCache.stamp === stamp) return entriesCache.list;
-  ensureDirs();
-  const out: Entry[] = [];
-  for (const f of fs.readdirSync(ENTRIES_DIR)) {
-    if (!f.endsWith(".md")) continue;
-    const e = parseEntry(path.join(ENTRIES_DIR, f));
-    if (e && e.meta.id) out.push(e);
-  }
-  out.sort((a, b) => (a.meta.id < b.meta.id ? 1 : -1));
-  entriesCache = { stamp, list: out };
-  return out;
+  return entryStore.listFull();
 }
 
-/** 按 id 前缀定位：先查索引（不读正文），只解析命中的那一个文件 */
+/** @deprecated 内部请用 entryStore.get(idPrefix) */
 function findEntry(idPrefix: string): Entry | null {
-  const rows = loadEntriesIndex();
-  const hit = rows.find((r) => r.id === idPrefix) ?? rows.find((r) => r.id.startsWith(idPrefix));
-  if (hit) return parseEntry(path.join(ENTRIES_DIR, `${hit.id}.md`));
-  // 索引可能落后于盘（极端并发），兜底全扫一次
-  const live = listEntries().find((e) => e.meta.id === idPrefix || e.meta.id.startsWith(idPrefix));
-  if (live) return live;
-  // 已失效搬进 expired/ 的条目仍可按 id 定位（renew/delete/restore 要用）
-  if (fs.existsSync(EXPIRED_DIR)) {
-    const f = fs
-      .readdirSync(EXPIRED_DIR)
-      .find((x) => x.endsWith(".md") && !x.startsWith("index-") && (x === `${idPrefix}.md` || x.startsWith(idPrefix)));
-    if (f) return parseEntry(path.join(EXPIRED_DIR, f));
-  }
-  return null;
+  return entryStore.get(idPrefix);
 }
 
 function normText(s: string): string {
@@ -482,7 +562,7 @@ function appendEvidence(e: Entry, ev: Ev): string | null {
   if (list.some((x) => x.at.slice(0, 10) === day && (x.id ?? "") === (ev.id ?? ""))) return null;
   const next = list.concat(ev).slice(-20);
   const meta = { ...e.meta, evidence: JSON.stringify(next) };
-  writeEntry(meta, e.body);
+  entryStore.put({ meta, body: e.body });
   const s = promoteScore({ meta, body: e.body });
   logActivity(`evidence +1 ${e.meta.id} kind=${ev.kind} total=${next.length} score=${s.score.toFixed(2)}`);
   return `${e.meta.id} 证据 +1（${ev.kind}，累计 ${next.length} 条 / ${s.days} 天 / ${s.independent} 源，转正分 ${s.score.toFixed(2)}${s.gate ? "，已越过门槛，可用 confirm 转正" : ""}）`;
@@ -510,7 +590,7 @@ function promoteScore(e: Entry) {
 /** 月度风格归纳（只读；写 profile 由人或 agent 做）：把窗口内的偏好/纠正/雷区摆出来当归纳材料 */
 function opStyleScan(days = 30, limit = 20): string {
   const since = new Date(Date.now() - days * 86400e3).toISOString();
-  const rows = loadEntriesIndex().filter(
+  const rows = entryStore.list().filter(
     (r) =>
       r.meta.status !== "expired" &&
       r.meta.status !== "superseded" &&
@@ -562,9 +642,9 @@ function styleScanOverdue(days = 30): boolean {
 }
 
 function opPromoteScan(limit = 20): string {
-  const rows = loadEntriesIndex()
+  const rows = entryStore.list()
     .filter((r) => r.meta.status === "inference") // 只有推断是转正候选，confirmed/explicit 无需评分
-    .map((r) => ({ r, e: parseEntry(entryPath(r.id)) }))
+    .map((r) => ({ r, e: entryStore.get(r.id) }))
     .filter((x): x is { r: (typeof rows)[number]["r"]; e: Entry } => !!x.e)
     .map(({ r, e }) => ({
       id: r.id,
@@ -590,17 +670,9 @@ function opPromoteScan(limit = 20): string {
     (sorted.length > n ? `\n…（另有 ${sorted.length - n} 条未显示，limit 可调）` : "")
   );
 }
-/** 冲突检测：先按 kind+subject 从索引筛候选（不读正文），只读命中候选的正文比对 */
+/** @deprecated 内部请用 entryStore.findConflicting(kind, subject, text) */
 function findConflicting(kind: string, subject: string, text: string): Entry | null {
-  const want = normText(subject);
-  const cands = loadEntriesIndex().filter(
-    (r) => ACTIVE.has(r.meta.status ?? "") && r.meta.kind === kind && normText(r.meta.subject ?? "") === want,
-  );
-  for (const r of cands) {
-    const e = parseEntry(path.join(ENTRIES_DIR, `${r.id}.md`));
-    if (e && bodySimilar(e.body, text)) return e;
-  }
-  return null;
+  return entryStore.findConflicting(kind, subject, text);
 }
 
 function today(): string {
@@ -658,7 +730,7 @@ function fmt(e: Entry, withBody = true): string {
 
 /** 简报/计数专用：只走索引（frontmatter + 标题），不装载正文 */
 function briefIndex() {
-  const all = loadEntriesIndex();
+  const all = entryStore.list();
   const active = all.filter((e) => ACTIVE.has(e.meta.status));
   const pending = active.filter((e) => e.meta.status === "inference");
   const due = active.filter((e) => isDue(e.meta));
@@ -666,7 +738,7 @@ function briefIndex() {
 }
 
 function brief() {
-  const all = listEntries();
+  const all = entryStore.listFull();
   const active = all.filter((e) => ACTIVE.has(e.meta.status));
   const pending = active.filter((e) => e.meta.status === "inference");
   const due = active.filter((e) => isDue(e.meta));
@@ -689,7 +761,7 @@ function opConfirm(e: Entry, note?: string): string {
     return `${e.meta.id} status=${e.meta.status}，无需确认。`;
   e.meta.status = "confirmed";
   e.meta.confirmed_at = new Date().toISOString();
-  writeEntry(e.meta, e.body);
+  entryStore.put({ meta: e.meta, body: e.body });
   logActivity(`confirmed ${e.meta.id}${note ? ` note=${note}` : ""}`);
   return `${e.meta.id} 已确认为 confirmed 事实。`;
 }
@@ -718,10 +790,10 @@ function opSupersede(e: Entry, text: string, note?: string): string {
     supersedes: old.id,
     superseded_by: "",
   };
-  writeEntry(nm, text);
+  entryStore.put({ meta: nm, body: text });
   old.status = "superseded";
   old.superseded_by = nid;
-  writeEntry(old, e.body);
+  entryStore.put({ meta: old, body: e.body });
   logActivity(`supersede ${old.id} -> ${nid}`);
   // 替代链深度：同一 subject 反复纠正时提示合并，防止同主题攒出十几代版本
   let depth = 1;
@@ -729,7 +801,7 @@ function opSupersede(e: Entry, text: string, note?: string): string {
   let cur: Meta | undefined = old;
   while (cur?.supersedes && !seen.has(cur.supersedes)) {
     seen.add(cur.supersedes);
-    const prev = findEntry(cur.supersedes);
+    const prev = entryStore.get(cur.supersedes);
     if (!prev) break;
     cur = prev.meta;
     depth++;
@@ -752,7 +824,7 @@ function opRenew(e: Entry, reviewAfter?: string, expiresAt?: string): string {
   }
   e.meta.review_after = ra;
   if (expiresAt) e.meta.expires_at = expiresAt;
-  writeEntry(e.meta, e.body);
+  entryStore.put({ meta: e.meta, body: e.body });
   logActivity(`renew ${e.meta.id} review_after=${ra} status=${e.meta.status}${resurrect ? " resurrect=1" : ""}`);
   return resurrect
     ? `${e.meta.id} 已复活（expired → explicit，搬回 entries/），review_after=${ra}。`
@@ -761,7 +833,7 @@ function opRenew(e: Entry, reviewAfter?: string, expiresAt?: string): string {
 
 function opExpire(e: Entry, note?: string): string {
   e.meta.status = "expired";
-  writeEntry(e.meta, e.body);
+  entryStore.put({ meta: e.meta, body: e.body });
   const moved = moveToExpired(e.meta.id);
   logActivity(`expire ${e.meta.id} moved=${moved ? "expired/" : "-"}${note ? ` note=${note}` : ""}`);
   return `${e.meta.id} 已标记过期${moved ? "并移入 expired/" : ""}（不再参与检索；restore 可取回，补 renew 即复活）。`;
@@ -789,7 +861,7 @@ function purgeCandidates(olderDays = 30): { closed: number; due: EntryIndex[] } 
           .map((f) => parseEntry(path.join(dir, f)))
           .filter((e): e is Entry => !!e)
       : [];
-  const fromIndex = loadEntriesIndex().filter((e) => e.meta.status === "expired" || e.meta.status === "superseded");
+  const fromIndex = entryStore.list().filter((e) => e.meta.status === "expired" || e.meta.status === "superseded");
   const fromExpired = listIn(EXPIRED_DIR).map((e) => toIndexRow(e.meta, titleOf(e.body)));
   const all = fromIndex.concat(fromExpired);
   return { closed: all.length, due: all.filter((e) => ageDays(e.meta) >= olderDays) };
@@ -866,7 +938,7 @@ function searchExpired(q: string, status?: string, limit = 30): string {
 
 /** 批量 expire：无 id 时按 kind/scope/subject_contains 选活动条目；dry_run 默认 true */
 function opExpireBatch(sel: { kind?: string; scope?: string; subject?: string }, dry = true, note?: string): string {
-  const pick = listEntries().filter(
+  const pick = entryStore.listFull().filter(
     (e) =>
       ACTIVE.has(e.meta.status) &&
       (!sel.kind || e.meta.kind === sel.kind) &&
@@ -880,7 +952,7 @@ function opExpireBatch(sel: { kind?: string; scope?: string; subject?: string },
     return `候选 ${pick.length} 条（dry_run，未改动）：\n${lines.slice(0, 15).join("\n")}${more}\n确认后传 dry_run=false；每条都可 renew 复活。`;
   for (const e of pick) {
     e.meta.status = "expired";
-    writeEntry(e.meta, e.body);
+    entryStore.put({ meta: e.meta, body: e.body });
     moveToExpired(e.meta.id);
   }
   logActivity(`expire-batch n=${pick.length} kind=${sel.kind ?? "-"} scope=${sel.scope ?? "-"} subject=${sel.subject ?? "-"}${note ? ` note=${note}` : ""}`);
@@ -893,19 +965,7 @@ function recoveryPath(id: string) {
 }
 
 function opDelete(e: Entry, note?: string): string {
-  fs.mkdirSync(RECOVERY_DIR, { recursive: true });
-  fs.writeFileSync(
-    recoveryPath(e.meta.id),
-    JSON.stringify({ meta: e.meta, body: e.body, deleted_at: new Date().toISOString(), note: note ?? "" }, null, 2),
-  );
-  const liveFile = entryPath(e.meta.id);
-  const coldFile = path.join(EXPIRED_DIR, `${e.meta.id}.md`);
-  try {
-    fs.unlinkSync(fs.existsSync(liveFile) ? liveFile : coldFile);
-  } catch {
-    /* 文件可能已被移走，recovery 记录仍有效 */
-  }
-  dropIndexRows([e.meta.id]);
+  entryStore.delete(e, note);
   logActivity(
     `delete ${e.meta.id} kind=${e.meta.kind} subject=${e.meta.subject} source="${e.meta.source}" body="${e.body.slice(0, 160)}"${note ? ` note=${note}` : ""} recovery=${e.meta.id}.json`,
   );
@@ -935,7 +995,7 @@ function opRestore(idPrefix: string): string {
   const rec = JSON.parse(fs.readFileSync(path.join(RECOVERY_DIR, f), "utf8")) as { meta: Meta; body: string };
   const id = rec.meta.id;
   if (fs.existsSync(entryPath(id))) return `${id} 条目仍在库中，无需恢复。`;
-  writeEntry(rec.meta, rec.body);
+  entryStore.put({ meta: rec.meta, body: rec.body });
   fs.unlinkSync(path.join(RECOVERY_DIR, f));
   logActivity(`restore ${id} kind=${rec.meta.kind} subject=${rec.meta.subject}`);
   return `${id} 已从 recovery 恢复（status=${rec.meta.status}）。`;
@@ -976,10 +1036,10 @@ function autoTriageEnabled(): boolean {
 function autoTriage(trigger: string): string[] {
   if (!autoTriageEnabled() || isPaused()) return [];
   // 候选只可能是 inference 条目：先走索引筛，再逐条读正文，避免为一次 A 档扫描装载全库
-  const cands = loadEntriesIndex().filter((e) => ACTIVE.has(e.meta.status) && e.meta.status === "inference");
+  const cands = entryStore.list().filter((e) => ACTIVE.has(e.meta.status) && e.meta.status === "inference");
   if (!cands.length) return [];
-  const allActive = loadEntriesIndex().filter((e) => ACTIVE.has(e.meta.status));
-  const active = cands.map((c) => parseEntry(entryPath(c.id))).filter((e): e is Entry => !!e);
+  const allActive = entryStore.list().filter((e) => ACTIVE.has(e.meta.status));
+  const active = cands.map((c) => entryStore.get(c.id)).filter((e): e is Entry => !!e);
   const acted: string[] = [];
   for (const e of active) {
     if (acted.length >= 5) break;
@@ -993,7 +1053,7 @@ function autoTriage(trigger: string): string[] {
           x.meta.id !== e.meta.id &&
           x.meta.subject === e.meta.subject &&
           x.meta.obtained_at > e.meta.obtained_at &&
-          SUCCESSOR_MARK.test(parseEntry(entryPath(x.id))?.body ?? ""),
+          SUCCESSOR_MARK.test(entryStore.get(x.id)?.body ?? ""),
       );
       if (n) rule = `A1 旧版本被 ${n.meta.id} 取代`;
     }
@@ -1033,7 +1093,7 @@ function validateScope(raw: string): string {
   const bad = tokens.filter((t) => !SCOPE_TOKEN_RE.test(t));
   if (!bad.length) return "";
   const known = new Set(
-    loadEntriesIndex()
+    entryStore.list()
       .flatMap((e) => (e.meta.scope || "").split(",").map((x) => x.trim()))
       .filter(Boolean),
   );
@@ -1046,12 +1106,12 @@ function validateScope(raw: string): string {
 function autoFactRetro(limit = 10): string[] {
   if (isPaused()) return [];
   const acted: string[] = [];
-  const cands = loadEntriesIndex().filter((r) => r.meta.status === "inference");
+  const cands = entryStore.list().filter((r) => r.meta.status === "inference");
   for (const r of cands) {
     if (acted.length >= limit) break;
     const conf = Number(r.meta.confidence ?? NaN);
     if (!autoFactable(r.meta.kind ?? "", conf, r.meta.action_impact)) continue;
-    const e = parseEntry(entryPath(r.id));
+    const e = entryStore.get(r.id);
     if (!e) continue;
     opConfirm(e, `auto-fact retro conf=${conf}`);
     acted.push(`${r.id}（conf ${conf}）`);
@@ -1066,11 +1126,11 @@ function autoFactEvidence(limit = 5): string[] {
   const minDays = Number(process.env.LIVING_MEMORY_AUTO_FACT_DAYS ?? 3);
   const minScore = Number(process.env.LIVING_MEMORY_AUTO_FACT_SCORE ?? PROMOTE_THRESHOLD);
   const acted: string[] = [];
-  const cands = loadEntriesIndex().filter((r) => r.meta.status === "inference");
+  const cands = entryStore.list().filter((r) => r.meta.status === "inference");
   for (const r of cands) {
     if (acted.length >= limit) break;
     if (r.meta.kind === "relation" || r.meta.action_impact === "needs-confirm") continue;
-    const e = parseEntry(entryPath(r.id));
+    const e = entryStore.get(r.id);
     if (!e) continue;
     const s = promoteScore(e);
     if (s.days < minDays || s.score < minScore || s.independent < 2) continue;
@@ -1842,7 +1902,7 @@ function noteSearchMiss(q: string, cwd?: string, scope?: string): void {
 
 /** entries 检索（工具与零命中日志共用）：元数据筛选走索引，只有全文匹配才装载正文 */
 function searchEntries(q: string, p: EntrySearchParams, cwd?: string): string {
-  let rows = loadEntriesIndex();
+  let rows = entryStore.list();
   if (p.status) rows = rows.filter((r) => r.meta.status === p.status);
   if (p.kind) rows = rows.filter((r) => r.meta.kind === p.kind);
   if (p.scope) {
@@ -1850,10 +1910,10 @@ function searchEntries(q: string, p: EntrySearchParams, cwd?: string): string {
     rows = rows.filter((r) => (r.meta.scope || "global").split(",").map((s) => s.trim()).includes(want));
   }
   if (p.subject_contains) rows = rows.filter((r) => r.meta.subject.includes(p.subject_contains!));
-  if (p.text_contains) rows = rows.filter((r) => (parseEntry(entryPath(r.id))?.body ?? "").includes(p.text_contains!));
+  if (p.text_contains) rows = rows.filter((r) => (entryStore.get(r.id)?.body ?? "").includes(p.text_contains!));
   if (q) {
     rows = rows.filter((r) => {
-      const full = parseEntry(entryPath(r.id));
+      const full = entryStore.get(r.id);
       return full ? matchesQuery(full, q) : false;
     });
   }
@@ -2071,7 +2131,7 @@ function coveredByEntry(text: string): string | null {
   const nb = normBody(text).replace(/^(决定|决策|约定|教训|结论|铁律|口径|规则|保留|采用)/, "");
   if (nb.length < 8) return null;
   const bag = bigrams(nb);
-  for (const e of listEntries()) {
+  for (const e of entryStore.listFull()) {
     if (!ACTIVE.has(e.meta.status)) continue;
     const eb = normBody(e.body);
     if (!eb) continue;
@@ -2090,7 +2150,7 @@ function coveredByEntry(text: string): string | null {
  * 纯读，不改库；结论只是"候选"，是否合并仍需人/agent 判断。
  */
 function findConflicts(): Array<{ type: string; label: string; ids: string[]; note: string }> {
-  const act = listEntries().filter((e) => ACTIVE.has(e.meta.status));
+  const act = entryStore.listFull().filter((e) => ACTIVE.has(e.meta.status));
   const out: Array<{ type: string; label: string; ids: string[]; note: string }> = [];
   const covered = new Set<string>();
   const pairKey = (a: string, b: string) => [a, b].sort().join("|");
@@ -2108,7 +2168,7 @@ function findConflicts(): Array<{ type: string; label: string; ids: string[]; no
     for (let a = 0; a < es.length; a++) for (let b = a + 1; b < es.length; b++) covered.add(pairKey(es[a].meta.id, es[b].meta.id));
   }
   const bodies = act
-    .map((e) => ({ e, t: normBody(parseEntry(entryPath(e.meta.id))?.body ?? "") }))
+    .map((e) => ({ e, t: normBody(entryStore.get(e.meta.id)?.body ?? "") }))
     .filter((x) => x.t.length >= 30);
   for (let i = 0; i < bodies.length; i++) {
     for (let j = i + 1; j < bodies.length; j++) {
@@ -2129,14 +2189,14 @@ function findConflicts(): Array<{ type: string; label: string; ids: string[]; no
 }
 
 function renderLint(): string {
-  const act = listEntries().filter((e) => ACTIVE.has(e.meta.status));
+  const act = entryStore.listFull().filter((e) => ACTIVE.has(e.meta.status));
   const hits = findConflicts();
   const head = `冲突自检：活动 ${act.length} 条，检出 ${hits.length} 组候选`;
   if (!hits.length) return `${head}（无同主体重复、无正文近似）。`;
   const rows = hits.map((h, i) => {
     const detail = h.ids
       .map((id) => {
-        const e = listEntries().find((x) => x.meta.id === id);
+        const e = entryStore.listFull().find((x) => x.meta.id === id);
         return e ? `${id}（${e.meta.kind}/${e.meta.status}/${e.meta.obtained_at.slice(0, 10)}）${e.meta.subject}` : id;
       })
       .join("  ⊗  ");
@@ -2149,7 +2209,7 @@ function renderLint(): string {
 function renderRouting(): string {
   const PROC = /修复|实现|部署|合并|重构|调试|排查|迁移|构建|编译|测试通过|改完|跑通/;
   const DECISIONISH = /决定|决策|约定|规则|铁律|口径|必须|永不|禁止|不要|优先|保留|采用|命名|锁定|白名单|不得|不允许|一律|须/;
-  const act = listEntries().filter((e) => ACTIVE.has(e.meta.status));
+  const act = entryStore.listFull().filter((e) => ACTIVE.has(e.meta.status));
   // A. 只看「本应短期」的类别：outcome/event/correction 若写成工程报告，才建议搬去 summary
   const PROCESS_KINDS = ["outcome", "event", "correction"];
   const likeSummary = act.filter(
@@ -2214,7 +2274,7 @@ function recallFor(query: string, cwd?: string, excludeIds?: Set<string>): Array
   const maxRows = Number.isFinite(configured) && configured > 0 ? Math.floor(configured) : 20000;
   // 语料口径 = 状态/scope 合格的全部条目；excludeIds（简报已展示）只影响输出，不参与 df/N 统计，
   // 否则简报抽走几十条会把 df 压到 1，idf 虚高到 3.9，单命中例外就会放行通用词
-  const corpus = loadEntriesIndex().filter(
+  const corpus = entryStore.list().filter(
     (r) => RECALL_STATUS.has(r.meta.status ?? "") && inScope(r, cwd),
   );
   // 硬上限：行数超限时只取索引前 maxRows 行（索引按 id 倒序，即优先较新条目）
@@ -2560,7 +2620,7 @@ async function runExtraction(text: string, ctx: any, reason: string): Promise<vo
         logActivity(`auto-extract skipped self-ref kind=${kind} subject=${subject} (${reason})`);
         continue;
       }
-      const dup = findConflicting(kind, subject, body);
+      const dup = entryStore.findConflicting(kind, subject, body);
       if (dup) {
         // 同一推断再次被抽取到：算一次复现证据（不新建条目，不改 confidence）
         if (dup.meta.status === "inference")
@@ -2585,7 +2645,7 @@ async function runExtraction(text: string, ctx: any, reason: string): Promise<vo
         supersedes: "",
         superseded_by: "",
       };
-      writeEntry(meta, body);
+      entryStore.put({ meta, body });
       logActivity(
         `auto-extract created ${id} kind=${kind} status=${meta.status}${autoFact ? ` auto-fact conf=${meta.confidence}` : ""} subject=${subject} (${reason})`,
       );
@@ -2659,7 +2719,7 @@ export default function (pi: ExtensionAPI) {
         return { content: [{ type: "text", text: "living memory 已被 /memory off 暂停——本次未写入。恢复需用户执行 /memory on。" }] };
       if (p.basis === "inference" && (p.confidence == null || p.confidence < 0 || p.confidence > 1))
         return { content: [{ type: "text", text: "basis=inference 必须带 confidence（0-1）。" }] };
-      const dup = findConflicting(p.kind, p.subject, p.text);
+      const dup = entryStore.findConflicting(p.kind, p.subject, p.text);
       if (dup) {
         // 推断条目被再次提及：记证据而不是新建（第二步）；显式陈述算最强证据 restate
         if (dup.meta.status === "inference" && (p.basis === "inference" || p.basis === "explicit")) {
@@ -2690,7 +2750,7 @@ export default function (pi: ExtensionAPI) {
       }
       // 软提示：同 subject+kind 已有活动条目（正文不相似也算）——只查索引，不读正文
       const wantSubj = normSubject(p.subject);
-      const siblings = loadEntriesIndex().filter(
+      const siblings = entryStore.list().filter(
         (r) => ACTIVE.has(r.meta.status ?? "") && r.meta.kind === p.kind && normSubject(r.meta.subject ?? "") === wantSubj,
       );
       const sibHint = siblings.length
@@ -2719,7 +2779,7 @@ export default function (pi: ExtensionAPI) {
         supersedes: "",
         superseded_by: "",
       };
-      writeEntry(meta, p.text);
+      entryStore.put({ meta, body: p.text });
       logActivity(
         autoFact
           ? `created ${id} kind=${p.kind} status=confirmed auto-fact conf=${p.confidence} subject=${p.subject}`
@@ -2782,7 +2842,7 @@ export default function (pi: ExtensionAPI) {
         if (src !== "summary") parts.push(searchTodos(q));
         if (src !== "todo") parts.push(searchSummary(q, p.project || ctx?.cwd));
         if (src === "all" && q) {
-          const hits = listEntries().filter((e: Entry) => ACTIVE.has(e.meta.status) && matchesQuery(e, q));
+          const hits = entryStore.listFull().filter((e: Entry) => ACTIVE.has(e.meta.status) && matchesQuery(e, q));
           parts.push(
             hits.length
               ? `entries：${hits.length} 条命中\n${hits.slice(0, 10).map((e: Entry) => fmt(e)).join("\n")}`
@@ -2935,7 +2995,7 @@ export default function (pi: ExtensionAPI) {
       if (p.action === "promote_scan")
         return { content: [{ type: "text", text: opPromoteScan(Number(p.match) || 20) }] };
       if (!p.id) return { content: [{ type: "text", text: `${p.action} 必须带 id（条目 id 或唯一前缀）。` }] };
-      const e = findEntry(p.id);
+      const e = entryStore.get(p.id);
       if (!e) return { content: [{ type: "text", text: `找不到条目 ${p.id}` }] };
       let msg: string;
       switch (p.action) {
@@ -3002,7 +3062,7 @@ function pctOf(n: number, d: number): string {
 
 /** 统计块正文：与 entries/ 现状一致，幂等（只替换 STATS 标记区间） */
 function profileBlock(): string {
-  const all = loadEntriesIndex();
+  const all = entryStore.list();
   const act = all.filter((e) => ACTIVE.has(e.meta.status));
   const count = (arr: Array<{ meta: Meta }>, f: (e: { meta: Meta }) => string) => {
     const m = new Map<string, number>();
@@ -3043,10 +3103,10 @@ function refreshProfile(dry = true): string {
   const next = re.test(old)
     ? old.replace(re, wrapped)
     : `${old}${old.endsWith("\n") ? "" : "\n"}\n${wrapped}\n`;
-  if (next === old) return `profile.md 统计块已是最新（活动 ${loadEntriesIndex().filter((e) => ACTIVE.has(e.meta.status)).length} 条），未写盘。`;
+  if (next === old) return `profile.md 统计块已是最新（活动 ${entryStore.list().filter((e) => ACTIVE.has(e.meta.status)).length} 条），未写盘。`;
   writeAtomic(PROFILE_FILE, next);
   logActivity("profile rebuild");
-  return `已刷新 ${PROFILE_FILE}（活动 ${loadEntriesIndex().filter((e) => ACTIVE.has(e.meta.status)).length} 条）`;
+  return `已刷新 ${PROFILE_FILE}（活动 ${entryStore.list().filter((e) => ACTIVE.has(e.meta.status)).length} 条）`;
 }
 
   // /memory 面板
@@ -3328,7 +3388,7 @@ function refreshProfile(dry = true): string {
             `待办 ${dueTodo.length} 项 7 日内到期${overdue ? `（其中 ${overdue} 项已逾期）` : ""}：source=todo query="due:soon" 查看`,
           );
         }
-        const styleDue = styleScanOverdue(30) && loadEntriesIndex().filter((r) => ACTIVE.has(r.meta.status ?? "explicit")).length >= 5;
+        const styleDue = styleScanOverdue(30) && entryStore.list().filter((r) => ACTIVE.has(r.meta.status ?? "explicit")).length >= 5;
         if (styleDue) hints.push("画像 30 天未归纳：action=style_scan 出候选，再按证据改写 profile.md 的三、四节");
         const fail24 = recentExtractFailures(24);
         if (fail24.length) {
