@@ -39,6 +39,11 @@ export function setup(): { src: string; deps: string | null; copied: boolean } {
   const dst = path.join(UNDER_TEST, "living-memory.ts");
   const prev = fs.existsSync(dst) ? fs.statSync(dst).size : -1;
   fs.copyFileSync(SRC, dst);
+  // 多文件扩展：源码旁的相对模块（src/）一并同步到被测件，扩展壳里的 ./src/* 才能解析
+  const srcModules = path.join(path.dirname(SRC), "src");
+  const dstModules = path.join(UNDER_TEST, "src");
+  fs.rmSync(dstModules, { recursive: true, force: true });
+  if (fs.existsSync(srcModules)) fs.cpSync(srcModules, dstModules, { recursive: true });
 
   const nm = path.join(UNDER_TEST, "node_modules");
   const deps = findDeps();
