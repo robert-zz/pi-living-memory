@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.2.1] - 2026-11-19
+
+结构调整优化（**对外行为零变化**，真库副本输出 10835 字节逐字节一致）。
+
+- `ops.ts` 二次拆分：1135 行 → 7 个模块 + 12 行纯 re-export 兼容层。
+  - `time.ts`(46) 日期与复核期谓词 · `scope.ts`(41) scope 过滤校验
+  - `evidence.ts`(191) 证据链与自动转正 · `lifecycle.ts`(214) 生命周期操作
+  - `documents.ts`(189) todo/summary 操作与锁包装 · `triage.ts`(75) 自动清理
+  - `search.ts`(433) 检索面、lint/routing、按问题召回
+- 壳 / `brief.ts` / `extract.ts` **零改动**（41+4+6 个符号仍从 `./ops` 取）。桶文件只是兼容层，新代码应直接 import 具体模块。
+- `SELF_REF_MARK` 因 triage 与 search 两处复用加 `export`（唯一非移动性改动；已用逐行多重集比对证明其余零改动）。
+- 依赖图 DFS 无环；7 个新文件顶层零 IO；`src/**` 无 import 壳。
+- 测试 230 断言 / 44 用例，迁移过程每步全绿（共 7 次）。
+
+文档：
+
+- 新增 `docs/development.md`（模块结构、jiti 两个坑、六条设计约束）与 `docs/publishing.md`（发布流程、2FA 与 staged publishing 全流程、发版前文档同步检查清单）。
+- README 322 → 262 行：开发轨/发布/设计约束三节移入 docs，改为「数据安全承诺」+「深入文档」链接；安装节补「改 packages 需重启 pi」。
+- 文档链接改绝对 URL（相对路径在 npm 包页面会 404）；修正 `<you>` 占位符与过期的测试计数、pack 体积。
 ## [0.2.0] - 2026-11-19
 
 重构（对外行为除「写入非法字段被拒」外不变）。
