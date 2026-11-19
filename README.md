@@ -21,7 +21,7 @@ per-turn prompt cost stays flat as the library grows.
 - **Before installing, know the defaults**: it writes `~/.pi/agent/memory/`, and by default
   sends the tail of each conversation to *your own* model provider for memory extraction
   (`LIVING_MEMORY_EXTRACT=0` disables). The Chinese section below spells out every side effect.
-- **Tests**: `bun tests/run.ts` — 28 cases / 137 assertions against a temporary HOME, never your real store.
+- **Tests**: `bun tests/run.ts` — 44 cases / 230 assertions against a temporary HOME, never your real store.
 - **Dependencies**: `typebox` and `@earendil-works/*` are host-provided. They are declared as
   `peerDependencies` and never bundled (a physical copy would bypass Pi's module mapping).
 
@@ -49,7 +49,7 @@ Pi 扩展：**带生命周期的长期记忆**。事实不再是散文段落，�
 pi install npm:pi-living-memory
 
 # git（钉 tag，可回滚）
-pi install git:github.com/<you>/pi-living-memory@v0.1.0
+pi install git:github.com/robert-zz/pi-living-memory@v0.2.0
 
 # 本地目录（开发用，不复制）
 pi install /path/to/pi-living-memory
@@ -228,7 +228,7 @@ score = confidence × 0.40        # 自评最多 40%
 ## 测试
 
 ```bash
-bun tests/run.ts            # 全部（21 用例 / 94 断言，约 3s）
+bun tests/run.ts            # 全部（44 用例 / 230 断言，约 4s）
 bun tests/run.ts --only brief
 bun tests/run.ts --list
 ```
@@ -244,7 +244,7 @@ bun tests/run.ts --list
 ```bash
 cd /path/to/pi-living-memory
 # 改 extensions/living-memory.ts
-bun tests/run.ts          # 28 用例 / 137 断言，跑在临时 HOME，不碰真库
+bun tests/run.ts          # 44 用例 / 230 断言，跑在临时 HOME，不碰真库
 /reload                   # 包路径就是本目录，pi 重新读盘即生效
 git commit -am "..." && git tag v0.1.x
 ```
@@ -255,7 +255,7 @@ git commit -am "..." && git tag v0.1.x
 
 ```bash
 pi update --extensions           # 按 settings 里写明的 spec 重新解析
-pi install git:github.com/<you>/pi-living-memory@v0.0.9   # 退回旧 tag
+pi install git:github.com/robert-zz/pi-living-memory@v0.1.14   # 退回旧 tag
 ```
 
 包升级只换代码，`~/.pi/agent/memory` 原样保留；`/reload` 即可生效。
@@ -264,7 +264,7 @@ pi install git:github.com/<you>/pi-living-memory@v0.0.9   # 退回旧 tag
 
 ```bash
 npm login --auth-type=web     # 浏览器完成登录（CLI 侧不再要求本地 OTP）
-npm pack --dry-run            # 看清单与体积（现在 459 KB / 27 个文件）
+npm pack --dry-run            # 看清单与体积（0.2.0：493 KB / 38 个文件）
 npm version patch             # bump 版本（已发布版本不可覆盖）
 npm stage publish             # 只是暂存；发布见下节「2FA 与 staged publishing」
 ```
