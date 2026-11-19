@@ -183,6 +183,10 @@ const PAUSE_FLAG = path.join(STORE, "paused");
 
 const KINDS = ["preference", "constraint", "commitment", "relation", "correction", "decision", "outcome"] as const;
 const ACTIVE = new Set(["explicit", "event", "inference", "confirmed"]);
+/** 全量合法 status（ACTIVE 是其中参与简报/召回的子集） */
+const KNOWN_STATUSES = new Set(["explicit", "event", "inference", "confirmed", "superseded", "expired"]);
+const ACTION_IMPACTS = new Set(["advice-only", "reminder", "needs-confirm"]);
+const SCOPE_TOKEN_RE = /^(global|workspace:[a-z0-9._-]+|project:[a-z0-9._-]+)$/i;
 /** 推断自动按事实处理的置信度门槛：>= 即直接 confirmed；低于门槛仍只作弱参考（「待确认」档） */
 const AUTO_FACT_CONF = () => refreshConfig().autoFactConf; // 原先每次调用读 env，故这里也重读（注入值仍生效）
 /** 自动转事实的排除面：关系类与 needs-confirm 仍需人工点头（错判代价不对称） */
@@ -191,6 +195,15 @@ const autoFactable = (kind: string, conf: number, impact?: string) =>
 
 type Meta = Record<string, string>;
 type Entry = { meta: Meta; body: string };
+
+/** manifest 校验结果：file 用库内相对路径（entries/x.md），便于 lint 直接展示 */
+interface ManifestIssue {
+  file: string;
+  id?: string;
+  field: string;
+  problem: string;
+  severity: "error" | "warn";
+}
 
 // ---------- store ----------
 function ensureDirs() {
@@ -315,7 +328,7 @@ function extractHealthText(): string {
   return [
     `extract：近 7 天失败 ${week.length} 次${counts ? `（${counts}）` : ""}，共记录 ${fails.length} 条（上限 ${EXTRACT_FAIL_KEEP}）`,
     ok ? `最近一次成功/跳过 ${ok}` : "还没有成功记录",
-    "失败原因分类：request-failed=模型调用抛错 / empty-response=模型没回内容 / no-json=回包里找不到 JSON 数组 / parse-failed=JSON 解析失败",
+    "失败原因分类：request-failed=模型调用抛错 / empty-response=模型没回内容 / no-json=回包里找不到 JSON 数组 / parse-failed=JSON 解析失败 / manifest-invalid=候选字段未通过写入校验",
     ...last,
   ].join("\n");
 }
@@ -417,7 +430,100 @@ function dirStamp(): string {
   }
 }
 
-// 索引行只保留简报需要的字段；source 等长字段不进索引（否则索引和正文一样大）
+// ---------- manifest 校验：读宽松、写收紧、问题显性化 ----------
+/** 库内相对路径（lint 展示用）；不在 STORE 下的路径原样返回 */
+function manifestFileLabel(file: string): string {
+  if (!file) return "";
+  const rel = path.relative(STORE, file);
+  return rel.startsWith("..") ? file : rel;
+}
+
+const DATE_FIELDS = ["obtained_at", "confirmed_at", "expires_at", "review_after"] as const;
+
+/**
+ * 纯函数、无 IO：只校验 frontmatter 字段本身。
+ * error = 字段值会让条目落进错误语义（丢索引、永进不了简报、NaN 排序、写进错误 scope 层），写入时必须拒；
+ * warn = 现状可运行但可疑（scope 为空读路径按 global 处理，不算坏数据）。
+ * 可选字段缺失一律不报（supersedes/evidence/source 等本就可空）。
+ */
+function validateManifest(meta: Meta, opts: { file?: string; requireId?: boolean } = {}): ManifestIssue[] {
+  const file = opts.file ? manifestFileLabel(opts.file) : manifestFileLabel(meta.id ? entryPath(meta.id) : "");
+  const requireId = opts.requireId ?? true;
+  const issues: ManifestIssue[] = [];
+  const add = (field: string, problem: string, severity: ManifestIssue["severity"]) =>
+    issues.push({ file, id: meta.id || undefined, field, problem, severity });
+
+  const id = (meta.id ?? "").trim();
+  if (!id) {
+    if (requireId) add("id", "缺少 id / id 为空（条目无法定位、索引与生命周期操作都会失去锚点）", "error");
+  }
+  const kind = (meta.kind ?? "").trim();
+  if (!(KINDS as readonly string[]).includes(kind))
+    add("kind", `kind="${kind}" 不在允许集合（${KINDS.join("/")}）；读路径会被各类筛选静默漏掉`, "error");
+  const status = (meta.status ?? "").trim();
+  if (!KNOWN_STATUSES.has(status))
+    add("status", `status="${status}" 不在合法集合（${[...KNOWN_STATUSES].join("/")}）；错拼会让条目永远进不了简报`, "error");
+
+  for (const field of DATE_FIELDS) {
+    const v = (meta[field] ?? "").trim();
+    // expires_at / review_after / confirmed_at 为空是合法现状（推断条目本来就没有确认日）
+    if (v && Number.isNaN(Date.parse(v))) add(field, `日期无法解析："${v}"（空值合法，非空必须是可解析的日期）`, "error");
+  }
+
+  const scope = (meta.scope ?? "").trim();
+  if (!scope) add("scope", "scope 为空（读路径按 global 处理，写入时应显式给出）", "warn");
+  else {
+    const bad = scope
+      .split(",")
+      .map((t) => t.trim())
+      .filter(Boolean)
+      .filter((t) => !SCOPE_TOKEN_RE.test(t));
+    if (bad.length)
+      add("scope", `非法 scope 值：${bad.join("、")}（只接受 global / workspace:<名> / project:<名>，多值用逗号）`, "error");
+  }
+
+  const impact = (meta.action_impact ?? "").trim();
+  if (impact && !ACTION_IMPACTS.has(impact))
+    add("action_impact", `action_impact="${impact}" 不在 advice-only / reminder / needs-confirm 内`, "error");
+  const conf = (meta.confidence ?? "").trim();
+  if (conf) {
+    const n = Number(conf);
+    if (!Number.isFinite(n) || n < 0 || n > 1) add("confidence", `confidence="${conf}" 不是 0-1 的数字`, "error");
+  }
+
+  return issues;
+}
+
+/** 扫描 entries/ 收集 manifest 问题（lint 用）：不抛异常，坏条目照现状跳过但仍报告 */
+function scanManifestIssues(): ManifestIssue[] {
+  ensureDirs();
+  const issues: ManifestIssue[] = [];
+  const byId = new Map<string, string[]>();
+  for (const f of fs.readdirSync(ENTRIES_DIR)) {
+    if (!f.endsWith(".md")) continue;
+    const file = path.join(ENTRIES_DIR, f);
+    const parsed = parseEntryWithIssues(file);
+    issues.push(...parsed.issues);
+    const id = parsed.entry?.meta.id;
+    if (!id) continue;
+    const files = byId.get(id) ?? [];
+    files.push(f);
+    byId.set(id, files);
+  }
+  for (const [id, files] of byId) {
+    if (files.length < 2) continue;
+    for (const f of files)
+      issues.push({
+        file: `entries/${f}`,
+        id,
+        field: "id",
+        problem: `同一 id 出现在 ${files.length} 个文件（${files.join("、")}）：索引会出现重复行、简报与召回会重复`,
+        severity: "error",
+      });
+  }
+  return issues;
+}
+
 function toIndexRow(meta: Meta, title: string): EntryIndex {
   const keep: Meta = {};
   for (const k of ["id", "kind", "status", "subject", "scope", "action_impact", "obtained_at", "expires_at", "review_after", "supersedes", "confidence"]) {
@@ -446,8 +552,11 @@ interface EntryStore {
   listFull(): Entry[];
   /** 按 id 前缀定位：先查索引，只解析命中的那 1 个文件；索引落后时回退全扫，最后查 expired/ */
   get(idPrefix: string): Entry | null;
-  /** 写条目：写到它当前所在目录（entries/ 或 expired/），活动条目同步索引行 */
-  put(e: Entry): void;
+  /**
+   * 写条目：写到它当前所在目录（entries/ 或 expired/），活动条目同步索引行。
+   * strict=true（默认）时先 validateManifest，有 error 直接抛；strict=false 只 logger.warn，供生命周期操作处理历史遗留条目。
+   */
+  put(e: Entry, opts?: { strict?: boolean }): void;
   /** 删除条目：落 recovery 记录、移走 entries/ 或 expired/ 下的文件、同步索引行 */
   delete(e: Entry, note?: string): void;
   /**
@@ -531,8 +640,16 @@ class FileEntryStore implements EntryStore {
     return null;
   }
 
-  put(e: Entry): void {
+  put(e: Entry, opts?: { strict?: boolean }): void {
     const { meta, body } = e;
+    const strict = opts?.strict ?? true;
+    const issues = validateManifest(meta, { file: manifestFileLabel(meta.id ? entryPath(meta.id) : "") });
+    const errors = issues.filter((i) => i.severity === "error");
+    if (errors.length) {
+      const msg = errors.map((i) => `${i.field}: ${i.problem}`).join("；");
+      if (strict) throw new Error(`manifest 不合法，未写入：${msg}`);
+      logger.warn(`manifest 不合法（strict=false，仍按原样写盘）：${meta.id || "(无 id)"} ${msg}`);
+    }
     ensureDirs();
     const live = entryPath(meta.id);
     const cold = path.join(EXPIRED_DIR, `${meta.id}.md`);
@@ -562,7 +679,8 @@ class FileEntryStore implements EntryStore {
 
   expire(e: Entry): boolean {
     e.meta.status = "expired";
-    this.put({ meta: e.meta, body: e.body });
+    // 历史遗留条目可能带着非法 kind/日期；expire 是收口旧数据的手段，不能因此失败
+    this.put({ meta: e.meta, body: e.body }, { strict: false });
     // 与旧 moveToExpired 同序：先写 status，再搬文件，最后删索引行（文件不在时不动索引）
     const moved = this.moveFileToExpired(e.meta.id);
     if (moved) dropIndexRows([e.meta.id]);
@@ -580,7 +698,8 @@ class FileEntryStore implements EntryStore {
     if (src === cold && !fs.existsSync(live)) fs.renameSync(cold, live);
     e.meta.status = status;
     for (const [k, v] of Object.entries(extraMeta ?? {})) e.meta[k] = v;
-    this.put({ meta: e.meta, body: e.body });
+    // 归档区条目是历史快照，复活不应被旧字段卡住
+    this.put({ meta: e.meta, body: e.body }, { strict: false });
     return true;
   }
 
@@ -625,7 +744,7 @@ class FileEntryStore implements EntryStore {
     const head = fs.existsSync(idx) ? "" : `# expired 归档索引 ${month}\n\n| id | kind | status | 记录日 | subject |\n|---|---|---|---|---|\n`;
     const rows = due.map((e) => {
       this.moveFileToExpired(e.meta.id); // 已在 expired/ 的只登记月度索引
-      return `| ${e.meta.id} | ${e.meta.kind} | ${e.meta.status} | ${e.meta.obtained_at.slice(0, 10)} | ${e.meta.subject.replace(/\|/g, "／")} |`;
+      return `| ${e.meta.id} | ${e.meta.kind ?? ""} | ${e.meta.status ?? ""} | ${(e.meta.obtained_at ?? "").slice(0, 10)} | ${(e.meta.subject ?? "").replace(/\|/g, "／")} |`;
     });
     fs.writeFileSync(idx, head + rows.join("\n") + "\n");
     dropIndexRows(due.map((e) => e.meta.id));
@@ -683,7 +802,8 @@ class FileEntryStore implements EntryStore {
     const rec = JSON.parse(fs.readFileSync(path.join(RECOVERY_DIR, f), "utf8")) as Entry;
     const id = rec.meta.id;
     if (fs.existsSync(entryPath(id))) return null;
-    this.put({ meta: rec.meta, body: rec.body });
+    // recovery/ 记录是删除时的历史快照，取回不应被旧字段卡住
+    this.put({ meta: rec.meta, body: rec.body }, { strict: false });
     fs.unlinkSync(path.join(RECOVERY_DIR, f));
     return rec;
   }
@@ -1034,25 +1154,42 @@ function writeEntry(meta: Meta, body: string) {
   entryStore.put({ meta, body });
 }
 
-function parseEntry(file: string): Entry | null {
+/** 纯解析（不做字段校验）：frontmatter 失败时 entry=null 并给出原因，交给 parseEntryWithIssues 转成 issue */
+function readEntryFile(file: string): { entry: Entry | null; failure: string } {
+  let text: string;
   try {
-    const text = fs.readFileSync(file, "utf8");
-    if (!text.startsWith("---\n")) return null;
-    const end = text.indexOf("\n---\n", 4);
-    if (end < 0) return null;
-    const meta: Meta = {};
-    for (const line of text.slice(4, end).split("\n")) {
-      const i = line.indexOf(": ");
-      if (i > 0) meta[line.slice(0, i)] = line.slice(i + 2);
-      else {
-        const j = line.indexOf(":");
-        if (j > 0) meta[line.slice(0, j)] = line.slice(j + 1);
-      }
-    }
-    return { meta, body: text.slice(end + 5).trim() };
+    text = fs.readFileSync(file, "utf8");
   } catch {
-    return null;
+    return { entry: null, failure: "文件无法读取" };
   }
+  if (!text.startsWith("---\n")) return { entry: null, failure: "缺少 frontmatter（文件未以 --- 开头）" };
+  const end = text.indexOf("\n---\n", 4);
+  if (end < 0) return { entry: null, failure: "frontmatter 未闭合（找不到 --- 分隔行）" };
+  const meta: Meta = {};
+  for (const line of text.slice(4, end).split("\n")) {
+    const i = line.indexOf(": ");
+    if (i > 0) meta[line.slice(0, i)] = line.slice(i + 2);
+    else {
+      const j = line.indexOf(":");
+      if (j > 0) meta[line.slice(0, j)] = line.slice(j + 1);
+    }
+  }
+  return { entry: { meta, body: text.slice(end + 5).trim() }, failure: "" };
+}
+
+function parseEntry(file: string): Entry | null {
+  return readEntryFile(file).entry;
+}
+
+/**
+ * 解析条目并同时产出 manifest 问题：读路径仍返回 null（坏条目照现状跳过），但不再静默。
+ * 无 frontmatter / 未闭合两类解析失败会给 field=frontmatter 的 error；解析成功则附带字段级校验结果。
+ */
+function parseEntryWithIssues(file: string): { entry: Entry | null; issues: ManifestIssue[] } {
+  const label = manifestFileLabel(file);
+  const { entry, failure } = readEntryFile(file);
+  if (!entry) return { entry: null, issues: [{ file: label, field: "frontmatter", problem: failure, severity: "error" }] };
+  return { entry, issues: validateManifest(entry.meta, { file }) };
 }
 
 /** @deprecated 内部请用 entryStore.listFull()（会读正文，简报不要用） */
@@ -1109,7 +1246,8 @@ function appendEvidence(e: Entry, ev: Ev): string | null {
   if (list.some((x) => x.at.slice(0, 10) === day && (x.id ?? "") === (ev.id ?? ""))) return null;
   const next = list.concat(ev).slice(-20);
   const meta = { ...e.meta, evidence: JSON.stringify(next) };
-  entryStore.put({ meta, body: e.body });
+  // 证据可能落在历史条目上：只警告不阻断（否则旧字段会把证据累积整条链路卡死）
+  entryStore.put({ meta, body: e.body }, { strict: false });
   const s = promoteScore({ meta, body: e.body });
   logger.activity(`evidence +1 ${e.meta.id} kind=${ev.kind} total=${next.length} score=${s.score.toFixed(2)}`);
   return `${e.meta.id} 证据 +1（${ev.kind}，累计 ${next.length} 条 / ${s.days} 天 / ${s.independent} 源，转正分 ${s.score.toFixed(2)}${s.gate ? "，已越过门槛，可用 confirm 转正" : ""}）`;
@@ -1264,7 +1402,7 @@ function isDue(meta: Meta): boolean {
 
 function fmt(e: Entry, withBody = true): string {
   const m = e.meta;
-  const tags = [m.kind, m.status, `scope=${m.scope}`];
+  const tags = [m.kind ?? "", m.status ?? "", `scope=${m.scope ?? ""}`];
   if (m.confidence) tags.push(`conf=${m.confidence}`);
   if (m.supersedes) tags.push(`supersedes=${m.supersedes}`);
   if (m.superseded_by) tags.push(`superseded_by=${m.superseded_by}`);
@@ -1308,7 +1446,7 @@ function opConfirm(e: Entry, note?: string): string {
     return `${e.meta.id} status=${e.meta.status}，无需确认。`;
   e.meta.status = "confirmed";
   e.meta.confirmed_at = new Date(clock.now()).toISOString();
-  entryStore.put({ meta: e.meta, body: e.body });
+  entryStore.put({ meta: e.meta, body: e.body }, { strict: false });
   logger.activity(`confirmed ${e.meta.id}${note ? ` note=${note}` : ""}`);
   return `${e.meta.id} 已确认为 confirmed 事实。`;
 }
@@ -1337,10 +1475,11 @@ function opSupersede(e: Entry, text: string, note?: string): string {
     supersedes: old.id,
     superseded_by: "",
   };
-  entryStore.put({ meta: nm, body: text });
+  // 新条目字段来自旧条目（可能是历史数据）：strict=false，问题由 logger.warn + lint 曝光
+  entryStore.put({ meta: nm, body: text }, { strict: false });
   old.status = "superseded";
   old.superseded_by = nid;
-  entryStore.put({ meta: old, body: e.body });
+  entryStore.put({ meta: old, body: e.body }, { strict: false });
   logger.activity(`supersede ${old.id} -> ${nid}`);
   // 替代链深度：同一 subject 反复纠正时提示合并，防止同主题攒出十几代版本
   let depth = 1;
@@ -1369,10 +1508,11 @@ function opRenew(e: Entry, reviewAfter?: string, expiresAt?: string): string {
     const reviveFields: Meta = { confirmed_at: "", ...patch };
     Object.assign(e.meta, { status: "explicit", ...reviveFields });
     // 复活由 store 搬文件 + 恢复索引行；盘上没有任何副本（并发删除）时退回按内存内容写回，语义同旧实现
-    if (!entryStore.resurrect(e.meta.id, "explicit", reviveFields)) entryStore.put({ meta: e.meta, body: e.body });
+    if (!entryStore.resurrect(e.meta.id, "explicit", reviveFields))
+      entryStore.put({ meta: e.meta, body: e.body }, { strict: false });
   } else {
     Object.assign(e.meta, patch);
-    entryStore.put({ meta: e.meta, body: e.body });
+    entryStore.put({ meta: e.meta, body: e.body }, { strict: false });
   }
   logger.activity(`renew ${e.meta.id} review_after=${ra} status=${e.meta.status}${resurrect ? " resurrect=1" : ""}`);
   return resurrect
@@ -1402,7 +1542,7 @@ function opPurgeExpired(olderDays = 30, dry = true): string {
   const { candidates: due, moved, closed } = entryStore.purgeExpired(olderDays, dry);
   if (!due.length)
     return `无符合条件条目（库内 status=expired/superseded 共 ${closed} 条，均未超过 ${olderDays} 天）。`;
-  const lines = due.map((e) => `${e.meta.id}（${e.meta.kind}/${e.meta.status}/${e.meta.obtained_at.slice(0, 10)}）${e.meta.subject}`);
+  const lines = due.map((e) => `${e.meta.id}（${e.meta.kind ?? ""}/${e.meta.status ?? ""}/${(e.meta.obtained_at ?? "").slice(0, 10)}）${e.meta.subject ?? ""}`);
   if (dry)
     return `候选 ${due.length} 条（dry_run，未移动）：\n${lines.slice(0, 15).join("\n")}${due.length > 15 ? `\n…（还有 ${due.length - 15} 条）` : ""}\n确认无误会后传 dry_run=false 执行：文件移到 expired/，仍可用 restore 取回。`;
   logger.activity(`purge_expired n=${moved} older_than_days=${olderDays} ids=${due.map((e) => e.meta.id).join(",")}`);
@@ -1453,8 +1593,8 @@ function opExpireBatch(sel: { kind?: string; scope?: string; subject?: string },
     (e) =>
       ACTIVE.has(e.meta.status) &&
       (!sel.kind || e.meta.kind === sel.kind) &&
-      (!sel.scope || e.meta.scope.split(",").map((s) => s.trim()).includes(sel.scope)) &&
-      (!sel.subject || e.meta.subject.includes(sel.subject)),
+      (!sel.scope || (e.meta.scope ?? "").split(",").map((s) => s.trim()).includes(sel.scope)) &&
+      (!sel.subject || (e.meta.subject ?? "").includes(sel.subject)),
   );
   if (!pick.length) return "没有匹配的活动条目（批量 expire 只作用于 explicit/event/inference/confirmed）。";
   const lines = pick.map((e) => `${e.meta.id}（${e.meta.kind}/${e.meta.status}）${e.meta.subject}`);
@@ -1582,7 +1722,6 @@ function inScope(e: { meta: Meta }, cwd?: string): boolean {
     .some((t) => t !== "" && t === base);
 }
 
-const SCOPE_TOKEN_RE = /^(global|workspace:[a-z0-9._-]+|project:[a-z0-9._-]+)$/i;
 /** scope 白名单校验：global / workspace:<名> / project:<名>（多值逗号分隔）；错拼会永远进不了对应层，因此直接拒写 */
 function validateScope(raw: string): string {
   const tokens = raw
@@ -2391,7 +2530,7 @@ function searchEntries(q: string, p: EntrySearchParams, cwd?: string): string {
     const want = p.scope.trim();
     rows = rows.filter((r) => (r.meta.scope || "global").split(",").map((s) => s.trim()).includes(want));
   }
-  if (p.subject_contains) rows = rows.filter((r) => r.meta.subject.includes(p.subject_contains!));
+  if (p.subject_contains) rows = rows.filter((r) => (r.meta.subject ?? "").includes(p.subject_contains!));
   if (p.text_contains) rows = rows.filter((r) => (entryStore.get(r.id)?.body ?? "").includes(p.text_contains!));
   if (q) {
     rows = rows.filter((r) => {
@@ -2551,8 +2690,8 @@ function searchArchive(q: string, limit: number): string {
   });
   return `归档检索「${q}」：命中 ${hits.length} 段（qmd BM25，快照索引，只读）\n${rows.join("\n")}${hits.length > n ? `\n…（还有 ${hits.length - n} 段，加 LIMIT 或收窄关键词）` : ""}`;
 }
-function normSubject(s: string): string {
-  return s
+function normSubject(s: string | undefined): string {
+  return (s ?? "")
     .toLowerCase()
     .replace(/[（(][^)）]*[)）]/g, "")
     .replace(/[\s·・、，,。.:：;；/\-—_'"“”‘’《》<>()[\]{}!！?？]/g, "");
@@ -2638,21 +2777,44 @@ function findConflicts(): Array<{ type: string; label: string; ids: string[]; no
   return out;
 }
 
+const SEVERITY_RANK: Record<ManifestIssue["severity"], number> = { error: 0, warn: 1 };
+
+/** 结构问题段：按 severity 排序（error 先），最多 20 条，末尾给总数 */
+function renderManifestIssues(issues: ManifestIssue[]): string {
+  if (!issues.length) return "结构问题：0 条（frontmatter、id、kind、status、日期、scope、action_impact、confidence 均合法）。";
+  const errors = issues.filter((i) => i.severity === "error").length;
+  const sorted = [...issues].sort(
+    (a, b) =>
+      SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] ||
+      a.file.localeCompare(b.file) ||
+      a.field.localeCompare(b.field),
+  );
+  const rows = sorted
+    .slice(0, 20)
+    .map((it, i) => `${i + 1}. [${it.severity}] ${it.file}${it.id ? `（id=${it.id}）` : ""} 字段 ${it.field}：${it.problem}`);
+  const more = issues.length > 20 ? `\n… 仅显示前 20 条，另有 ${issues.length - 20} 条未显示。` : "";
+  return [`结构问题：检出 ${issues.length} 条（error ${errors} / warn ${issues.length - errors}）`, ...rows].join("\n") + more;
+}
+
 function renderLint(): string {
   const act = entryStore.listFull().filter((e) => ACTIVE.has(e.meta.status));
   const hits = findConflicts();
+  const issues = scanManifestIssues();
   const head = `冲突自检：活动 ${act.length} 条，检出 ${hits.length} 组候选`;
-  if (!hits.length) return `${head}（无同主体重复、无正文近似）。`;
-  const rows = hits.map((h, i) => {
-    const detail = h.ids
-      .map((id) => {
-        const e = entryStore.listFull().find((x) => x.meta.id === id);
-        return e ? `${id}（${e.meta.kind}/${e.meta.status}/${e.meta.obtained_at.slice(0, 10)}）${e.meta.subject}` : id;
-      })
-      .join("  ⊗  ");
-    return `${i + 1}. [${h.type}] ${h.label}\n   ${detail}\n   → ${h.note}，建议 supersede 合并 + expire 另一条`;
-  });
-  return `${head}\n${rows.join("\n")}`;
+  const conflicts = hits.length
+    ? `${head}\n${hits
+        .map((h, i) => {
+          const detail = h.ids
+            .map((id) => {
+              const e = entryStore.listFull().find((x) => x.meta.id === id);
+              return e ? `${id}（${e.meta.kind ?? ""}/${e.meta.status ?? ""}/${(e.meta.obtained_at ?? "").slice(0, 10)}）${e.meta.subject ?? ""}` : id;
+            })
+            .join("  ⊗  ");
+          return `${i + 1}. [${h.type}] ${h.label}\n   ${detail}\n   → ${h.note}，建议 supersede 合并 + expire 另一条`;
+        })
+        .join("\n")}`
+    : `${head}（无同主体重复、无正文近似）。`;
+  return `${conflicts}\n\n${renderManifestIssues(issues)}`;
 }
 
 /** 分流审计：entries 里像工程实况的 / summary 里像长期事实的，各给建议 */
@@ -2876,7 +3038,7 @@ function buildBrief(cwd?: string, query?: string): string {
     .sort((a, b) => String(b.meta.obtained_at).localeCompare(String(a.meta.obtained_at)))
     .slice(0, 3);
   if (recent.length) {
-    const line = `近期：${recent.map((e) => `${e.meta.obtained_at.slice(5, 10)} ${e.meta.kind}/${e.meta.subject.slice(0, 16)}`).join(" · ")}`;
+    const line = `近期：${recent.map((e) => `${(e.meta.obtained_at ?? "").slice(5, 10)} ${e.meta.kind ?? ""}/${(e.meta.subject ?? "").slice(0, 16)}`).join(" · ")}`;
     if (used + line.length + 1 <= cfg.briefMaxChars) {
       lines.push(line);
       used += line.length + 1;
@@ -3100,7 +3262,13 @@ async function runExtraction(text: string, ctx: any, reason: string): Promise<vo
         supersedes: "",
         superseded_by: "",
       };
-      entryStore.put({ meta, body });
+      try {
+        entryStore.put({ meta, body });
+      } catch (err) {
+        // 抽取候选也走同一道闸：模型传来的字段非法时不落盘，记进抽取失败台账后继续下一条
+        noteExtractFailure("manifest-invalid", `${subject}: ${err instanceof Error ? err.message : String(err)}`);
+        continue;
+      }
       logger.activity(
         `auto-extract created ${id} kind=${kind} status=${meta.status}${autoFact ? ` auto-fact conf=${meta.confidence}` : ""} subject=${subject} (${reason})`,
       );
@@ -3234,7 +3402,12 @@ export default function (pi: ExtensionAPI) {
         supersedes: "",
         superseded_by: "",
       };
-      entryStore.put({ meta, body: p.text });
+      try {
+        entryStore.put({ meta, body: p.text });
+      } catch (err) {
+        // 写路径收紧：非法字段（日期/id/kind/status/scope/confidence…）拒绝落盘，原因回给调用方
+        return { content: [{ type: "text", text: `${err instanceof Error ? err.message : String(err)}\n（本次未写入；修正字段后重试。）` }] };
+      }
       logger.activity(
         autoFact
           ? `created ${id} kind=${p.kind} status=confirmed auto-fact conf=${p.confidence} subject=${p.subject}`
@@ -3526,11 +3699,11 @@ function profileBlock(): string {
   };
   const list = (arr: Array<[string, number]>) => arr.map(([k, v]) => `${k} ${v}条`).join(" · ") || "（无）";
   const scopes = new Map<string, number>();
-  for (const e of act) for (const s of e.meta.scope.split(",").map((x) => x.trim()).filter(Boolean)) scopes.set(s, (scopes.get(s) ?? 0) + 1);
-  const dates = act.map((e) => e.meta.obtained_at.slice(0, 10)).filter(Boolean).sort();
+  for (const e of act) for (const s of (e.meta.scope ?? "").split(",").map((x) => x.trim()).filter(Boolean)) scopes.set(s, (scopes.get(s) ?? 0) + 1);
+  const dates = act.map((e) => (e.meta.obtained_at ?? "").slice(0, 10)).filter(Boolean).sort();
   const age = dates.length ? Math.round((clock.now() - new Date(`${dates[0]}T00:00:00Z`).getTime()) / 86_400_000) : 0;
-  const multi = act.filter((e) => e.meta.scope.includes(",")).length;
-  const proj = act.filter((e) => /project:|workspace:/.test(e.meta.scope)).length;
+  const multi = act.filter((e) => (e.meta.scope ?? "").includes(",")).length;
+  const proj = act.filter((e) => /project:|workspace:/.test(e.meta.scope ?? "")).length;
   const superseded = all.filter((e) => e.meta.status === "superseded").length;
   const stamp = new Date(clock.now()).toISOString().slice(0, 16).replace("T", " ");
   return [

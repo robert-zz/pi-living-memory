@@ -102,7 +102,7 @@ pi install /path/to/pi-living-memory
 | `summary-archive` | 已归档的旧工程小节 |
 | `all` | 前三者一起查 |
 | `archive` | qmd 只读快照检索（需要 `query`，走 `LIVING_MEMORY_QMD` 指定的 qmd） |
-| `lint` | 冲突/重复自检：同 subject 的活动条目按正文 bigram Jaccard 相似度分组 |
+| `lint` | 冲突/重复自检 + **结构问题**：同 subject 的活动条目按正文 bigram Jaccard 相似度分组；随后列出 frontmatter 结构错误（缺 id、非法 kind/status/日期/scope、同 id 多文件等），按 severity 排序，最多 20 条并给总数 |
 | `routing` | 分流审计：条目 ↔ summary 归属建议（工程实况类内容应迁 summary） |
 | `expired` | 归档区失效条目（只读，带 id 供 `restore` 取回） |
 | `extract` | 抽取器健康：近 7 天失败次数、按原因计数、明细片段、最近一次成功 |
@@ -114,6 +114,31 @@ pi install /path/to/pi-living-memory
 ### 斜杠命令
 
 `/memory` 开面板（review / pending / todo / profile / style / on / off），`/memory pending` 逐条确认推断，`/memory style` 跑一次 30 天风格归纳。
+
+## 数据校验与 lint
+
+条目是 `entries/<id>.md` 的 frontmatter + 正文。校验分两条路径，**故意不对称**：
+
+- **读路径宽松**：坏条目不会拖垮整个记忆层。解析失败或字段非法的条目仍被跳过（与早期行为一致），但问题会被记录下来，不再静默。
+- **写路径收紧**：`remember` 与自动抽取在落盘前校验，有 error 直接拒绝并把字段与原因回给你；抽取器会把失败记进 `extract-failures.jsonl`（reason=`manifest-invalid`）后继续处理下一条候选。
+- **生命周期操作放宽**：`expire` / `restore` / `resurrect` / `appendEvidence` / 自动清理与转正走 `strict:false`——它们处理的是历史快照，不能被旧字段卡死。代价是非法旧条目经 `expire` 后仍带错字段躺在 `expired/`，lint 会持续报告，这是有意的。
+
+合法值：
+
+| 字段 | 规则 |
+|---|---|
+| `id` | 必填，非空；同一 id 出现在多个文件会报 error |
+| `kind` | `preference` / `constraint` / `commitment` / `relation` / `correction` / `decision` / `outcome` |
+| `status` | `explicit` / `event` / `inference` / `confirmed` / `superseded` / `expired`（前四个算「活动」） |
+| `obtained_at` / `confirmed_at` / `expires_at` / `review_after` | 可被 `Date.parse` 解析；**留空合法**（推断本无 `confirmed_at`，`expires_at`/`review_after` 常空） |
+| `scope` | 逗号分隔多值，每项为 `global` / `workspace:<名>` / `project:<名>`；为空只 warn |
+| `action_impact` | `advice-only` / `reminder` / `needs-confirm`（可空） |
+| `confidence` | 0–1 的有限数字（可空） |
+| `supersedes` / `evidence` / `source` 等 | 可空，不校验 |
+
+为什么严格：非法日期会让 `ageDays` 变 `NaN`，purge 的「保留近 N 天」判断失效，条目可能被当作可清理；`status` 错拼（如 `explici`）会让条目**永远进不了简报与召回**，而文件看起来还在。
+
+自查：`living_memory source=lint`；开屏 hints 在存在结构问题时也会提示（受 `LIVING_MEMORY_START_HINTS` 控制）。
 
 ## 简报与开屏
 
@@ -292,3 +317,4 @@ stage 与 approve 是两次独立请求，可分布在不同设备：**stage 跟
 3. **简报有硬上限**：任何新增注入内容都要进分档预算，不得直接拼接。
 4. **自动转正有闸门**：`inference` → `confirmed` 有两条自动路径（置信度 ≥0.85、证据 ≥3 天且复合分 ≥0.80），但 `kind=relation` 与 `action_impact=needs-confirm` **永自动**，只能人工 `confirm`；面板与人工干预流程不变。
 5. **过期不删数据**：`expired/` 与 `recovery/` 都靠轮转而非删除清理。
+6. **读宽松、写严格**：frontmatter 校验在读路径只记录不阻断，写路径拒绝非法字段，生命周期操作对历史快照放宽（见「数据校验与 lint」）。

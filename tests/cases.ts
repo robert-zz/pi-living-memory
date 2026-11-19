@@ -23,6 +23,9 @@ export const CASES: Meta[] = [
   { id: "summary-archive", title: "实况：summary_archive keep=3 移出最老小节", seed: "basic" },
   { id: "purge", title: "清理：purge_expired 移入 expired/ + 月度台账", seed: "basic" },
   { id: "lint", title: "自检：重复/冲突检出", seed: "lint" },
+  { id: "manifest-invalid", title: "manifest：非法字段读宽松 + lint 报出 + 写入拒绝", seed: "basic" },
+  { id: "manifest-frontmatter", title: "manifest：无/未闭合 frontmatter 报出且不拖垮索引", seed: "basic" },
+  { id: "manifest-legacy-lenient", title: "manifest：历史非法条目仍可 expire/renew/restore", seed: "basic" },
   { id: "routing", title: "审计：长条目建议迁 summary", seed: "routing" },
   { id: "index-selfheal", title: "索引：删掉三个派生索引后自愈", seed: "basic" },
   { id: "archive-guard", title: "归档：qmd 缺失时降级为可读提示", seed: "basic" },
@@ -52,6 +55,16 @@ export const CASES: Meta[] = [
   { id: "clock-freeze", title: "时钟：冻结时钟决定到期分档（策略走注入 Clock）", seed: "basic" },
   { id: "config-inject", title: "配置：setConfig 改简报上限，还原后一致", seed: "bulk" },
 ];
+
+const fmText = (fields: Record<string, string>, body: string) =>
+  `---\n${Object.entries(fields)
+    .map(([k, v]) => `${k}: ${v}`)
+    .join("\n")}\n---\n${body}\n`;
+const rawEntry = (home: string, file: string, text: string) => {
+  const dir = path.join(mem(home), "entries");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, file), text);
+};
 
 const checks: Array<{ name: string; ok: boolean; detail?: string }> = [];
 const ok = (name: string, cond: any, detail?: any) => checks.push({ name, ok: !!cond, detail: detail === undefined ? undefined : String(detail) });
@@ -275,6 +288,138 @@ async function body(id: string, home: string) {
       const r = out(await L.call("living_memory", { source: "lint" }));
       ok("检出重复/冲突", /重复|冲突/.test(r), r.split("\n").filter((l) => /重复|冲突/.test(l))[0]?.slice(0, 60));
       ok("指向重叠的两个 id", r.includes("20260102-000001-l1l1") || r.includes("20260102-000002-l2l2"));
+      return;
+    }
+    case "manifest-invalid": {
+      // 坏 frontmatter 本身合法可解析，但字段非法：读路径不能崩，lint 必须报，写入必须拒
+      rawEntry(home, "bad-no-id.md", fmText({ kind: "decision", status: "explicit", subject: "缺 id 条目", scope: "global" }, "缺 id 正文。"));
+      rawEntry(
+        home,
+        "20250101-000000-bad1.md",
+        fmText(
+          { id: "20250101-000000-bad1", kind: "decision", status: "explici", subject: "错状态条目", scope: "global", expires_at: "definitely-not-a-date" },
+          "错状态正文。",
+        ),
+      );
+      rawEntry(
+        home,
+        "20250101-000000-bad2.md",
+        fmText(
+          {
+            id: "20250101-000000-bad2",
+            kind: "nonsense",
+            status: "explicit",
+            subject: "非法类别条目",
+            scope: "global;project:acme",
+            action_impact: "maybe",
+            confidence: "1.5",
+          },
+          "非法类别正文。",
+        ),
+      );
+      rawEntry(home, "20250101-000000-warn1.md", fmText({ id: "20250101-000000-warn1", kind: "decision", status: "explicit", subject: "空 scope 条目" }, "空 scope 正文。"));
+      // 同 id 两个文件：索引会出两行，lint 要检
+      const dup = { id: "20250101-000000-dupe", kind: "decision", status: "explicit", subject: "重复 id 条目", scope: "global" };
+      rawEntry(home, "dup-a.md", fmText(dup, "重复 id 正文 A。"));
+      rawEntry(home, "dup-b.md", fmText({ ...dup, subject: "重复 id 条目 B" }, "重复 id 正文 B。"));
+
+      const L = await load(home, AUTO_OFF);
+      const ctx = mkCtx("/work/acme");
+      await L.handlers.session_start({ reason: "startup" }, ctx);
+      // (a) 读路径：坏条目不拖垮简报/检索
+      const b: any = await L.handlers.before_agent_start({ systemPrompt: "BASE" }, ctx);
+      const brief = String(b?.systemPrompt ?? "");
+      ok("坏条目不阻断简报", brief.includes("测试决策甲"), brief.split("\n").find((l) => l.includes("测试决策甲"))?.slice(0, 50));
+      const list = out(await L.call("living_memory", { source: "entries", list: true }));
+      ok("坏条目不阻断条目检索", list.includes("测试决策甲"), list.split("\n")[0]?.slice(0, 50));
+
+      // (b) lint 必须按字段报出，且 error 排在 warn 前
+      const lint = out(await L.call("living_memory", { source: "lint" }));
+      ok("lint 报 id 缺失", lint.includes("字段 id") && /缺少 id/.test(lint), lint.split("\n").find((l) => l.includes("缺少 id"))?.slice(0, 80));
+      ok("lint 报非法 status", lint.includes("字段 status") && lint.includes("explici"), lint.split("\n").find((l) => l.includes("字段 status"))?.slice(0, 80));
+      ok("lint 报非法日期", lint.includes("字段 expires_at") && lint.includes("definitely-not-a-date"));
+      ok("lint 报非法 kind", lint.includes("字段 kind") && lint.includes("nonsense"));
+      ok("lint 报非法 scope", lint.includes("字段 scope") && lint.includes("global;project:acme"));
+      ok("lint 报非法 action_impact", lint.includes("字段 action_impact") && lint.includes("maybe"), lint.split("\n").find((l) => l.includes("action_impact"))?.slice(0, 80));
+      ok("lint 报非法 confidence", lint.includes("字段 confidence") && lint.includes("1.5"));
+      ok("lint 报空 scope 为 warn", /\[warn\][^\n]*字段 scope/.test(lint), lint.split("\n").find((l) => l.includes("[warn]"))?.slice(0, 80));
+      ok("lint 报同 id 多文件", /同一 id 出现在 2 个文件/.test(lint), lint.split("\n").find((l) => l.includes("同一 id"))?.slice(0, 100));
+      ok("结构问题段有总数", /结构问题：检出 \d+ 条（error \d+ \/ warn \d+）/.test(lint), lint.split("\n").find((l) => l.includes("结构问题"))?.slice(0, 80));
+      ok("error 排在 warn 之前", lint.indexOf("[error]") < lint.indexOf("[warn]"), `error@${lint.indexOf("[error]")} warn@${lint.indexOf("[warn]")}`);
+
+      // (c) 写路径拒绝非法字段，并回原因；不落盘
+      const before = fs.readdirSync(path.join(mem(home), "entries")).length;
+      const badDate = out(
+        await L.call("remember", { kind: "decision", subject: "非法日期主题", text: "非法日期正文", basis: "explicit", source: "test", expires_at: "definitely-not-a-date" }),
+      );
+      ok("remember 拒绝非法日期", /manifest 不合法/.test(badDate) && badDate.includes("expires_at"), badDate.slice(0, 100));
+      const badKind = out(await L.call("remember", { kind: "nonsense", subject: "非法类别主题", text: "非法类别正文", basis: "explicit", source: "test" }));
+      ok("remember 拒绝非法 kind", /manifest 不合法/.test(badKind) && badKind.includes("kind"), badKind.slice(0, 100));
+      const badStatus = out(await L.call("remember", { kind: "decision", subject: "非法状态主题", text: "非法状态正文", basis: "explici", source: "test" }));
+      ok("remember 拒绝非法 status", /manifest 不合法/.test(badStatus) && badStatus.includes("status"), badStatus.slice(0, 100));
+      ok("被拒后没有落盘", fs.readdirSync(path.join(mem(home), "entries")).length === before, `${before} → ${fs.readdirSync(path.join(mem(home), "entries")).length}`);
+      return;
+    }
+    case "manifest-frontmatter": {
+      rawEntry(home, "broken-no-fm.md", "# 没有 frontmatter\n正文不该被当成条目。\n");
+      rawEntry(
+        home,
+        "broken-unclosed.md",
+        "---\nid: 20250101-000000-brok\nkind: decision\nstatus: explicit\nsubject: 未闭合条目\nscope: global\n正文缺少闭合分隔行。\n",
+      );
+      const L = await load(home, AUTO_OFF);
+      await L.call("living_memory", { source: "entries", list: true });
+      const idx = JSON.parse(read(home, "index.json") || "{}");
+      ok("正常条目仍在索引", (idx.rows ?? []).some((r: any) => r.id === "20260101-000001-a1b2") && (idx.rows ?? []).some((r: any) => r.id === "20260101-000002-c3d4"));
+      ok("未闭合条目被跳过（不进索引）", !(idx.rows ?? []).some((r: any) => r.id === "20250101-000000-brok"));
+      const lint = out(await L.call("living_memory", { source: "lint" }));
+      ok("lint 报无 frontmatter", lint.includes("broken-no-fm.md") && lint.includes("缺少 frontmatter"), lint.split("\n").find((l) => l.includes("broken-no-fm"))?.slice(0, 80));
+      ok("lint 报 frontmatter 未闭合", lint.includes("broken-unclosed.md") && lint.includes("未闭合"), lint.split("\n").find((l) => l.includes("broken-unclosed"))?.slice(0, 80));
+      ok("结构问题总数 2", /结构问题：检出 2 条（error 2 \/ warn 0）/.test(lint), lint.split("\n").find((l) => l.includes("结构问题"))?.slice(0, 80));
+      ok("坏条目不影响正常检索", out(await L.call("living_memory", { source: "entries", query: "测试决策甲" })).includes("测试决策甲"));
+      return;
+    }
+    case "manifest-legacy-lenient": {
+      rawEntry(
+        home,
+        "20250101-000000-leg1.md",
+        fmText(
+          {
+            id: "20250101-000000-leg1",
+            kind: "nonsense",
+            status: "explici",
+            subject: "遗留坏条目",
+            scope: "global",
+            source: "legacy fixture",
+            obtained_at: "2025-01-01T00:00:00.000Z",
+            confirmed_at: "",
+            expires_at: "",
+            review_after: "2025-13-40",
+            confidence: "",
+            action_impact: "advice-only",
+          },
+          "遗留坏条目正文。",
+        ),
+      );
+      const L = await load(home, AUTO_OFF);
+      const { setLogger } = await import("./under-test/living-memory.ts");
+      const warns: string[] = [];
+      setLogger({ activity: () => {}, debug: () => {}, warn: (m: string) => warns.push(m) });
+
+      const lint0 = out(await L.call("living_memory", { source: "lint" }));
+      ok("lint 报出遗留非法条目", lint0.includes("20250101-000000-leg1") && lint0.includes("字段 status"), lint0.split("\n").find((l) => l.includes("leg1"))?.slice(0, 80));
+
+      const ex = out(await L.call("living_memory_update", { action: "expire", id: "20250101-000000-leg1" }));
+      ok("expire 仍能执行", /已标记过期/.test(ex) && exists(home, "expired/20250101-000000-leg1.md"), ex.slice(0, 60));
+      ok("expire 走 strict=false 并记 warning", warns.some((w) => w.includes("strict=false")), warns.join(" | ").slice(0, 120));
+
+      const rn = out(await L.call("living_memory_update", { action: "renew", id: "20250101-000000-leg1" }));
+      ok("renew 复活仍能执行", /已复活/.test(rn) && exists(home, "entries/20250101-000000-leg1.md"), rn.slice(0, 60));
+      ok("resurrect 走 strict=false 并记 warning", warns.filter((w) => w.includes("strict=false")).length >= 2, `${warns.length} 条`);
+
+      await L.call("living_memory_update", { action: "expire", id: "20250101-000000-leg1" });
+      const rs = out(await L.call("living_memory_update", { action: "restore", id: "20250101-000000-leg1" }));
+      ok("expire→restore 仍能执行", exists(home, "entries/20250101-000000-leg1.md"), rs.slice(0, 60));
       return;
     }
     case "routing": {
