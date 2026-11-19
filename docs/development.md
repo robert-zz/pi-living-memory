@@ -9,19 +9,29 @@
 模块结构（0.2.0 起）：
 
 ```
-extensions/living-memory.ts      壳：pi 注册、工具 schema、事件接线
+```
+extensions/living-memory.ts      壳：pi 注册、工具 schema、事件接线（955 行）
   src/config.ts                  Config/Clock/Logger 注入层
   src/text.ts                    纯文本工具（无 IO）
   src/paths.ts                   路径常量 + 文件原语（顶层零 IO）
   src/manifest.ts                frontmatter 解析与校验
   src/recall.ts                  BM25 打分（纯函数）
   src/stores/{entry,todo,summary}-store.ts
-  src/ops.ts                     治理动作
+  src/time.ts                    日期与复核期谓词
+  src/scope.ts                   scope 过滤与校验
+  src/evidence.ts                证据链、复合分、自动转正
+  src/lifecycle.ts               confirm/supersede/expire/restore/purge
+  src/documents.ts               todo 与 summary 的操作及锁包装
+  src/triage.ts                  自动清理 + 自指判定正则
+  src/search.ts                  检索面、lint/routing、按问题召回
+  src/ops.ts                     **纯 re-export 兼容层**（12 行）
   src/brief.ts                   简报装配
   src/extract.ts                 自动抽取
 ```
 
-依赖按层单向：`config → text/paths → manifest → recall/stores → ops → brief → extract → 壳`。每条 import 边的层号严格递减，因此不可能成环。pi 用 jiti 加载扩展，相对 import 不带扩展名即可，**不需要打包步骤**。
+依赖按层单向：`config → text/paths → manifest → recall/stores → time/scope → lifecycle → evidence/triage → documents/search → ops → brief → extract → 壳`。每条 import 边指向更底层，DFS 检测无环。pi 用 jiti 加载扩展，相对 import 不带扩展名即可，**不需要打包步骤**。
+
+**`ops.ts` 只是兼容层**：壳 / brief / extract 历史上从 `./ops` 取 41+4+6 个符号，拆分时为免改 51 处 import 而保留桶文件。**新代码请直接 import 具体模块**（如 `from "./evidence"`），别再往桶里加依赖——桶存在的意义是让旧调用方不用动，不是让新代码继续模糊依赖。
 
 ## 日常循环
 
