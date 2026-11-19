@@ -23,156 +23,24 @@ import { spawnSync } from "node:child_process";
 import * as os from "node:os";
 import * as path from "node:path";
 
-// ---------- 注入层：Config / Clock / Logger ----------
-// 策略层原先把「环境变量 / 墙上时钟 / 日志」三件事隐式依赖到进程里；这里改成显式注入，行为与原先逐一对齐：
-// 默认实现仍是同一套读 env、同一套 Date.now()、同一套写盘，只是调用点不再直接摸它们，测试可以换掉。
-
-interface Config {
-  /** LIVING_MEMORY_AUTO_FACT：推断自动按事实的置信度门槛 */
-  autoFactConf: number;
-  /** LIVING_MEMORY_ACTIVITY_MAX：activity.log 轮转阈值（字节） */
-  activityMaxBytes: number;
-  /** LIVING_MEMORY_RECALL_2L：2 字母 ASCII 技术缩写白名单（已 split/trim/小写） */
-  recall2L: string[];
-  /** LIVING_MEMORY_PROMOTE_THRESHOLD：推断转正复合分门槛 */
-  promoteThreshold: number;
-  /** LIVING_MEMORY_NO_AUTO_REVIEW=1：不设默认复核日期 */
-  noAutoReview: boolean;
-  /** LIVING_MEMORY_RECOVERY_DAYS：recovery/ 保留天数 */
-  recoveryRetainDays: number;
-  /** LIVING_MEMORY_AUTO_TRIAGE：原样保留（"0" 强制关 / "1" 强制开 / 其它交给设置） */
-  autoTriage: string | undefined;
-  /** LIVING_MEMORY_AUTO_FACT_EVIDENCE=0：关证据驱动的自动转事实 */
-  autoFactEvidenceOff: boolean;
-  /** LIVING_MEMORY_AUTO_FACT_DAYS：证据驱动转正的最少独立天数 */
-  autoFactMinDays: number;
-  /** LIVING_MEMORY_AUTO_FACT_SCORE：证据驱动转正的最小分（null=用 promoteThreshold） */
-  autoFactMinScore: number | null;
-  /** LIVING_MEMORY_BRIEF_MAX_CHARS：简报总长硬顶 */
-  briefMaxChars: number;
-  /** LIVING_MEMORY_TODO_DIGEST_CHARS：简报里待办正文摘录长度 */
-  todoDigestChars: number;
-  /** LIVING_MEMORY_PROFILE_BRIEF："on"=注入画像 / "off"=不注入 / undefined=看 profile-brief.on 文件 */
-  profileBrief: "on" | "off" | undefined;
-  /** LIVING_MEMORY_SUMMARY_KEEP：summary.md 活动小节保留数 */
-  summaryKeep: number;
-  /** LIVING_MEMORY_MISS_LOG != 0：零命中写 miss.log */
-  missLog: boolean;
-  /** LIVING_MEMORY_QMD：归档检索外挂 qmd 的可执行文件 */
-  qmdBin: string;
-  /** LIVING_MEMORY_QMD_TIMEOUT_MS：qmd 调用超时 */
-  qmdTimeoutMs: number;
-  /** LIVING_MEMORY_RECALL_MAX_ROWS：召回索引行上限 */
-  recallMaxRows: number;
-  /** LIVING_MEMORY_RECALL != 0：简报尾部召回段开关 */
-  recallEnabled: boolean;
-  /** LIVING_MEMORY_DEBUG=1：调试日志落盘 */
-  debug: boolean;
-  /** LIVING_MEMORY_EXTRACT != 0：自动抽取开关 */
-  extractEnabled: boolean;
-  /** LIVING_MEMORY_EXTRACT_MODEL：抽取用的 "provider/model-id"（已 trim） */
-  extractModel: string;
-  /** LIVING_MEMORY_EXTRACT_TIMEOUT_MS：抽取超时 */
-  extractTimeoutMs: number;
-  /** LIVING_MEMORY_START_HINTS != 0：session_start 提示开关 */
-  startHints: boolean;
-  /** LIVING_MEMORY_AUTO_ARCHIVE_KEEP：自动归档 summary 的保留节数 */
-  autoArchiveKeep: number;
-  /** LIVING_MEMORY_AUTO_ARCHIVE=1：超过 autoArchiveKeep 自动归档 */
-  autoArchive: boolean;
-  /** LIVING_MEMORY_PROFILE_AUTO != 0：session_start 刷新画像统计块 */
-  profileAuto: boolean;
-  /** LIVING_MEMORY_BRIEF != 0：简报注入开关 */
-  briefEnabled: boolean;
-}
-
-/** 集中读取 LIVING_MEMORY_* ：解析式与原散读点逐一对齐（Number(...) 保留 NaN、三态开关保留原比较） */
-function loadConfig(env: Record<string, string | undefined> = process.env): Config {
-  const promoteThreshold = Number(env.LIVING_MEMORY_PROMOTE_THRESHOLD ?? 0.8);
-  const autoFactScore = env.LIVING_MEMORY_AUTO_FACT_SCORE;
-  return {
-    autoFactConf: Number(env.LIVING_MEMORY_AUTO_FACT ?? 0.85),
-    activityMaxBytes: Number(env.LIVING_MEMORY_ACTIVITY_MAX ?? 1_000_000),
-    recall2L: (env.LIVING_MEMORY_RECALL_2L ?? "ai,ci,pr,ui,db,ss")
-      .split(",")
-      .map((s) => s.trim().toLowerCase())
-      .filter(Boolean),
-    promoteThreshold,
-    noAutoReview: env.LIVING_MEMORY_NO_AUTO_REVIEW === "1",
-    recoveryRetainDays: Number(env.LIVING_MEMORY_RECOVERY_DAYS ?? 180),
-    autoTriage: env.LIVING_MEMORY_AUTO_TRIAGE,
-    autoFactEvidenceOff: env.LIVING_MEMORY_AUTO_FACT_EVIDENCE === "0",
-    autoFactMinDays: Number(env.LIVING_MEMORY_AUTO_FACT_DAYS ?? 3),
-    autoFactMinScore: autoFactScore === undefined ? null : Number(autoFactScore),
-    briefMaxChars: Number(env.LIVING_MEMORY_BRIEF_MAX_CHARS ?? 2400),
-    todoDigestChars: Number(env.LIVING_MEMORY_TODO_DIGEST_CHARS ?? 70),
-    profileBrief: env.LIVING_MEMORY_PROFILE_BRIEF === "1" ? "on" : env.LIVING_MEMORY_PROFILE_BRIEF === "0" ? "off" : undefined,
-    summaryKeep: Number(env.LIVING_MEMORY_SUMMARY_KEEP ?? 60),
-    missLog: env.LIVING_MEMORY_MISS_LOG !== "0",
-    qmdBin: env.LIVING_MEMORY_QMD ?? "qmd",
-    qmdTimeoutMs: Number(env.LIVING_MEMORY_QMD_TIMEOUT_MS ?? 30_000),
-    recallMaxRows: Number(env.LIVING_MEMORY_RECALL_MAX_ROWS ?? 20000),
-    recallEnabled: env.LIVING_MEMORY_RECALL !== "0",
-    debug: env.LIVING_MEMORY_DEBUG === "1",
-    extractEnabled: env.LIVING_MEMORY_EXTRACT !== "0",
-    extractModel: (env.LIVING_MEMORY_EXTRACT_MODEL ?? "").trim(),
-    extractTimeoutMs: Number(env.LIVING_MEMORY_EXTRACT_TIMEOUT_MS ?? 20000),
-    startHints: env.LIVING_MEMORY_START_HINTS !== "0",
-    autoArchiveKeep: Number(env.LIVING_MEMORY_AUTO_ARCHIVE_KEEP ?? 120),
-    autoArchive: env.LIVING_MEMORY_AUTO_ARCHIVE === "1",
-    profileAuto: env.LIVING_MEMORY_PROFILE_AUTO !== "0",
-    briefEnabled: env.LIVING_MEMORY_BRIEF !== "0",
-  };
-}
-
-/** setConfig 注入的覆盖：refreshConfig 重读 env 时要保留，否则注入值会被环境变量冲掉 */
-let configOverrides: Partial<Config> = {};
-/** 启动时读一次 env（与原先的模块级常量同口径） */
-let cfg: Config = loadConfig();
-/** 测试/宿主注入：浅合并进当前 cfg 并记住，后续 refreshConfig 不会冲掉 */
-function setConfig(c: Partial<Config>): void {
-  configOverrides = { ...configOverrides, ...c };
-  cfg = { ...cfg, ...c };
-}
-/** 重读 env 并重新叠加注入值：给原先「每次调用读 env」的点保住原语义 */
-function refreshConfig(): Config {
-  cfg = { ...loadConfig(), ...configOverrides };
-  return cfg;
-}
-
-/** 策略层的唯一时间来源：now() 用毫秒，today() 用「今天」的日期串 */
-interface Clock {
-  now(): number;
-  today(): string;
-}
-/** 默认时钟 = 墙上时钟；today() 与原 today() 同口径（UTC ISO 前 10 位，不是本地日期） */
-const systemClock: Clock = {
-  now: () => Date.now(),
-  today: () => new Date().toISOString().slice(0, 10),
-};
-let clock: Clock = systemClock;
-/** 测试/宿主注入：冻结时钟后，到期分档、addDays、归档戳、锁超时判定全都走它 */
-function setClock(c: Clock): void {
-  clock = c;
-}
-
-/** 策略层的日志出口：activity=审计事实记录，debug=排错线索，warn=异常但可继续 */
-interface Logger {
-  activity(msg: string): void;
-  debug(msg: string): void;
-  warn(msg: string): void;
-}
-/** 默认实现 = 原有写盘行为：activity 写 activity.log（含轮转），debug 仅在 LIVING_MEMORY_DEBUG=1 时落盘，warn 静默（现状本就没有控制台输出） */
-const systemLogger: Logger = {
-  activity: (msg) => appendActivityLog(msg),
-  debug: (msg) => appendDebugLog(msg),
-  warn: () => {},
-};
-let logger: Logger = systemLogger;
-/** 测试/宿主注入：接管日志输出（例如断言「记了哪几条审计」而不落盘） */
-function setLogger(l: Logger): void {
-  logger = l;
-}
+// ---------- 多文件扩展：注入层 / 纯文本 / manifest / 召回计算 ----------
+// 单向依赖：config ← text ← manifest；recall 依赖 config/text。路径常量与 IO 仍在本文件（扩展壳）。
+import { cfg, clock, logger, refreshConfig, setConfig, setClock, setLogger } from "./src/config";
+import { bigrams, bodySimilar, jaccard, normBody, normSubject, normText } from "./src/text";
+import {
+  ACTIVE,
+  KINDS,
+  SCOPE_TOKEN_RE,
+  parseEntry,
+  parseEntryWithIssues,
+  toIndexRow,
+  validateManifest,
+  type Entry,
+  type EntryIndex,
+  type ManifestIssue,
+  type Meta,
+} from "./src/manifest";
+import { RECALL_STATUS, rankRecall } from "./src/recall";
 
 const STORE = path.join(os.homedir(), ".pi", "agent", "memory");
 const ENTRIES_DIR = path.join(STORE, "entries");
@@ -181,29 +49,12 @@ let entriesCache: { stamp: string; list: Entry[] } | null = null;
 const ACTIVITY = path.join(STORE, "activity.log");
 const PAUSE_FLAG = path.join(STORE, "paused");
 
-const KINDS = ["preference", "constraint", "commitment", "relation", "correction", "decision", "outcome"] as const;
-const ACTIVE = new Set(["explicit", "event", "inference", "confirmed"]);
-/** 全量合法 status（ACTIVE 是其中参与简报/召回的子集） */
-const KNOWN_STATUSES = new Set(["explicit", "event", "inference", "confirmed", "superseded", "expired"]);
-const ACTION_IMPACTS = new Set(["advice-only", "reminder", "needs-confirm"]);
-const SCOPE_TOKEN_RE = /^(global|workspace:[a-z0-9._-]+|project:[a-z0-9._-]+)$/i;
 /** 推断自动按事实处理的置信度门槛：>= 即直接 confirmed；低于门槛仍只作弱参考（「待确认」档） */
 const AUTO_FACT_CONF = () => refreshConfig().autoFactConf; // 原先每次调用读 env，故这里也重读（注入值仍生效）
 /** 自动转事实的排除面：关系类与 needs-confirm 仍需人工点头（错判代价不对称） */
 const autoFactable = (kind: string, conf: number, impact?: string) =>
   Number.isFinite(conf) && conf >= AUTO_FACT_CONF() && kind !== "relation" && impact !== "needs-confirm";
 
-type Meta = Record<string, string>;
-type Entry = { meta: Meta; body: string };
-
-/** manifest 校验结果：file 用库内相对路径（entries/x.md），便于 lint 直接展示 */
-interface ManifestIssue {
-  file: string;
-  id?: string;
-  field: string;
-  problem: string;
-  severity: "error" | "warn";
-}
 
 // ---------- store ----------
 function ensureDirs() {
@@ -218,6 +69,13 @@ function newId(): string {
   const stamp = `${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}-${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}`;
   return `${stamp}-${Math.random().toString(16).slice(2, 6)}`;
 }
+/** 默认日志出口：activity 写 activity.log（含轮转），debug 仅在 LIVING_MEMORY_DEBUG=1 时落盘，warn 静默。
+ *  真正的落点实现（appendActivityLog/appendDebugLog）依赖 STORE 与轮转，所以由本文件注入。 */
+setLogger({
+  activity: (msg) => appendActivityLog(msg),
+  debug: (msg) => appendDebugLog(msg),
+  warn: () => {},
+});
 /** @deprecated 策略层请用 logger.activity(msg)；旧名保留为薄包装 */
 function logActivity(line: string): void {
   logger.activity(line);
@@ -391,35 +249,12 @@ function withFileLockSync<T>(file: string, fn: () => T): T {
     }
   }
 }
-type EntryIndex = { id: string; meta: Meta; title: string; toks: string[] };
 const INDEX_FILE = path.join(STORE, "index.json");
 const MISS_FILE = path.join(STORE, "miss.log");
 const MISS_KEEP = 200;
 /** 派生索引的格式版本：字段或语义变化时递增；stamp 相同不代表格式相同，旧索引一律重建 */
 const IDX_VERSION = 4;
 
-/**
- * 2 字母 ASCII 白名单：`ai/ci/pr/ui/db/ss` 这类本是技术标识符，被 ≥3 的规则误杀会让「PR 评审」「CI 失败」
- * 这类提问召回不到。默认值可被 `LIVING_MEMORY_RECALL_2L` 覆盖/追加（逗号分隔，全小写）。
- */
-const ASCII_SHORT_OK = new Set(cfg.recall2L);
-/**
- * 召回词元：索引与查询共用同一套切法，避免 BM25 只在一边成立。
- * 中文走 bigram：每个连续汉字段取所有相邻两字组合，单字段保留其本身。
- * ASCII 走整词：按空白/标点切成整词，只保留长度 ≥3 的（以及 2 字母白名单 `ASCII_SHORT_OK` 里的技术缩写），
- * `-A` 这类碎片与 `is/to` 这类功能词不进索引，不做子词或前缀匹配。入参保留原始空白与标点，词边界才不会在归一化时被抹掉。
- * 字典序去重后截断到 40 个，控制索引体积。
- */
-function tokensOf(text: string): string[] {
-  const out = new Set<string>();
-  for (const m of text.toLowerCase().matchAll(/[a-z0-9]+/g)) if (m[0].length >= 3 || ASCII_SHORT_OK.has(m[0])) out.add(m[0]);
-  for (const m of text.matchAll(/\p{Script=Han}+/gu)) {
-    const run = m[0];
-    if (run.length === 1) out.add(run);
-    else for (let i = 0; i + 1 < run.length; i++) out.add(run.slice(i, i + 2));
-  }
-  return [...out].sort().slice(0, 40);
-}
 let indexCache: { stamp: string; rows: EntryIndex[] } | null = null;
 
 function dirStamp(): string {
@@ -438,61 +273,6 @@ function manifestFileLabel(file: string): string {
   return rel.startsWith("..") ? file : rel;
 }
 
-const DATE_FIELDS = ["obtained_at", "confirmed_at", "expires_at", "review_after"] as const;
-
-/**
- * 纯函数、无 IO：只校验 frontmatter 字段本身。
- * error = 字段值会让条目落进错误语义（丢索引、永进不了简报、NaN 排序、写进错误 scope 层），写入时必须拒；
- * warn = 现状可运行但可疑（scope 为空读路径按 global 处理，不算坏数据）。
- * 可选字段缺失一律不报（supersedes/evidence/source 等本就可空）。
- */
-function validateManifest(meta: Meta, opts: { file?: string; requireId?: boolean } = {}): ManifestIssue[] {
-  const file = opts.file ? manifestFileLabel(opts.file) : manifestFileLabel(meta.id ? entryPath(meta.id) : "");
-  const requireId = opts.requireId ?? true;
-  const issues: ManifestIssue[] = [];
-  const add = (field: string, problem: string, severity: ManifestIssue["severity"]) =>
-    issues.push({ file, id: meta.id || undefined, field, problem, severity });
-
-  const id = (meta.id ?? "").trim();
-  if (!id) {
-    if (requireId) add("id", "缺少 id / id 为空（条目无法定位、索引与生命周期操作都会失去锚点）", "error");
-  }
-  const kind = (meta.kind ?? "").trim();
-  if (!(KINDS as readonly string[]).includes(kind))
-    add("kind", `kind="${kind}" 不在允许集合（${KINDS.join("/")}）；读路径会被各类筛选静默漏掉`, "error");
-  const status = (meta.status ?? "").trim();
-  if (!KNOWN_STATUSES.has(status))
-    add("status", `status="${status}" 不在合法集合（${[...KNOWN_STATUSES].join("/")}）；错拼会让条目永远进不了简报`, "error");
-
-  for (const field of DATE_FIELDS) {
-    const v = (meta[field] ?? "").trim();
-    // expires_at / review_after / confirmed_at 为空是合法现状（推断条目本来就没有确认日）
-    if (v && Number.isNaN(Date.parse(v))) add(field, `日期无法解析："${v}"（空值合法，非空必须是可解析的日期）`, "error");
-  }
-
-  const scope = (meta.scope ?? "").trim();
-  if (!scope) add("scope", "scope 为空（读路径按 global 处理，写入时应显式给出）", "warn");
-  else {
-    const bad = scope
-      .split(",")
-      .map((t) => t.trim())
-      .filter(Boolean)
-      .filter((t) => !SCOPE_TOKEN_RE.test(t));
-    if (bad.length)
-      add("scope", `非法 scope 值：${bad.join("、")}（只接受 global / workspace:<名> / project:<名>，多值用逗号）`, "error");
-  }
-
-  const impact = (meta.action_impact ?? "").trim();
-  if (impact && !ACTION_IMPACTS.has(impact))
-    add("action_impact", `action_impact="${impact}" 不在 advice-only / reminder / needs-confirm 内`, "error");
-  const conf = (meta.confidence ?? "").trim();
-  if (conf) {
-    const n = Number(conf);
-    if (!Number.isFinite(n) || n < 0 || n > 1) add("confidence", `confidence="${conf}" 不是 0-1 的数字`, "error");
-  }
-
-  return issues;
-}
 
 /** 扫描 entries/ 收集 manifest 问题（lint 用）：不抛异常，坏条目照现状跳过但仍报告 */
 function scanManifestIssues(): ManifestIssue[] {
@@ -502,7 +282,7 @@ function scanManifestIssues(): ManifestIssue[] {
   for (const f of fs.readdirSync(ENTRIES_DIR)) {
     if (!f.endsWith(".md")) continue;
     const file = path.join(ENTRIES_DIR, f);
-    const parsed = parseEntryWithIssues(file);
+    const parsed = parseEntryWithIssues(file, manifestFileLabel(file));
     issues.push(...parsed.issues);
     const id = parsed.entry?.meta.id;
     if (!id) continue;
@@ -524,14 +304,6 @@ function scanManifestIssues(): ManifestIssue[] {
   return issues;
 }
 
-function toIndexRow(meta: Meta, title: string): EntryIndex {
-  const keep: Meta = {};
-  for (const k of ["id", "kind", "status", "subject", "scope", "action_impact", "obtained_at", "expires_at", "review_after", "supersedes", "confidence"]) {
-    if (meta[k]) keep[k] = meta[k];
-  }
-  // 词元由「subject + 标题」生成：召回只在索引行上算分，正文不参与（保留原空白/标点给 ASCII 整词用）
-  return { id: meta.id, meta: keep, title, toks: tokensOf(`${meta.subject ?? ""} ${title}`) };
-}
 
 // 索引里的标题是摘要不是全文：中文每字 3 字节，160 字会让索引逼近正文体积
 const titleOf = (body: string) =>
@@ -1154,43 +926,6 @@ function writeEntry(meta: Meta, body: string) {
   entryStore.put({ meta, body });
 }
 
-/** 纯解析（不做字段校验）：frontmatter 失败时 entry=null 并给出原因，交给 parseEntryWithIssues 转成 issue */
-function readEntryFile(file: string): { entry: Entry | null; failure: string } {
-  let text: string;
-  try {
-    text = fs.readFileSync(file, "utf8");
-  } catch {
-    return { entry: null, failure: "文件无法读取" };
-  }
-  if (!text.startsWith("---\n")) return { entry: null, failure: "缺少 frontmatter（文件未以 --- 开头）" };
-  const end = text.indexOf("\n---\n", 4);
-  if (end < 0) return { entry: null, failure: "frontmatter 未闭合（找不到 --- 分隔行）" };
-  const meta: Meta = {};
-  for (const line of text.slice(4, end).split("\n")) {
-    const i = line.indexOf(": ");
-    if (i > 0) meta[line.slice(0, i)] = line.slice(i + 2);
-    else {
-      const j = line.indexOf(":");
-      if (j > 0) meta[line.slice(0, j)] = line.slice(j + 1);
-    }
-  }
-  return { entry: { meta, body: text.slice(end + 5).trim() }, failure: "" };
-}
-
-function parseEntry(file: string): Entry | null {
-  return readEntryFile(file).entry;
-}
-
-/**
- * 解析条目并同时产出 manifest 问题：读路径仍返回 null（坏条目照现状跳过），但不再静默。
- * 无 frontmatter / 未闭合两类解析失败会给 field=frontmatter 的 error；解析成功则附带字段级校验结果。
- */
-function parseEntryWithIssues(file: string): { entry: Entry | null; issues: ManifestIssue[] } {
-  const label = manifestFileLabel(file);
-  const { entry, failure } = readEntryFile(file);
-  if (!entry) return { entry: null, issues: [{ file: label, field: "frontmatter", problem: failure, severity: "error" }] };
-  return { entry, issues: validateManifest(entry.meta, { file }) };
-}
 
 /** @deprecated 内部请用 entryStore.listFull()（会读正文，简报不要用） */
 function listEntries(): Entry[] {
@@ -1202,28 +937,6 @@ function findEntry(idPrefix: string): Entry | null {
   return entryStore.get(idPrefix);
 }
 
-function normText(s: string): string {
-  return s.toLowerCase().replace(/[\s\p{P}]+/gu, "");
-}
-
-/** 同 subject+kind 且正文相似（包含或 bigram 重叠>0.6）才算冲突——不同偏好可共存 */
-function bodySimilar(a: string, b: string): boolean {
-  const x = normText(a);
-  const y = normText(b);
-  if (!x || !y) return false;
-  if (x.includes(y) || y.includes(x)) return true;
-  const grams = (t: string) => {
-    const s = new Set<string>();
-    for (let i = 0; i < t.length - 1; i++) s.add(t.slice(i, i + 2));
-    return s;
-  };
-  const gx = grams(x);
-  const gy = grams(y);
-  let inter = 0;
-  for (const g of gx) if (gy.has(g)) inter++;
-  if (Math.min(gx.size, gy.size) < 8) return false; // 短句易误判：不足 8 个二元组只当不同
-  return inter / (gx.size + gy.size - inter) > 0.5; // Jaccard：两段都要真的相似
-}
 
 // ---------- 推断转正评分（第一步：只读打分，不改状态） ----------
 // 原则：自评置信度最多贡献 0.4 分；跨会话复现 ≤0.35；用户原话重述 0.35；
@@ -2690,29 +2403,6 @@ function searchArchive(q: string, limit: number): string {
   });
   return `归档检索「${q}」：命中 ${hits.length} 段（qmd BM25，快照索引，只读）\n${rows.join("\n")}${hits.length > n ? `\n…（还有 ${hits.length - n} 段，加 LIMIT 或收窄关键词）` : ""}`;
 }
-function normSubject(s: string | undefined): string {
-  return (s ?? "")
-    .toLowerCase()
-    .replace(/[（(][^)）]*[)）]/g, "")
-    .replace(/[\s·・、，,。.:：;；/\-—_'"“”‘’《》<>()[\]{}!！?？]/g, "");
-}
-
-function normBody(s: string): string {
-  return s.toLowerCase().replace(/\s+/g, "").replace(/[，,。.;；:：、"'“”‘’《》()（）]/g, "");
-}
-
-function bigrams(s: string): Set<string> {
-  const out = new Set<string>();
-  for (let i = 0; i < s.length - 1; i++) out.add(s.slice(i, i + 2));
-  return out;
-}
-
-function jaccard(a: Set<string>, b: Set<string>): number {
-  if (!a.size || !b.size) return 0;
-  let inter = 0;
-  for (const x of a) if (b.has(x)) inter++;
-  return inter / (a.size + b.size - inter);
-}
 
 /** 这段正文是否已被某条活动条目覆盖（Jaccard ≥ 0.45，或整句被条目正文包含） */
 function coveredByEntry(text: string): string | null {
@@ -2858,92 +2548,17 @@ function renderRouting(): string {
   return out.join("\n");
 }
 
-// ---------- 按问题召回：索引行上的 BM25，命中后才读正文 ----------
-/** 只有这些状态的条目能进召回；推断（inference）仍须人工确认，不直接当事实引用 */
-const RECALL_STATUS = new Set(["confirmed", "explicit", "event"]);
-/** 高频词元闸门：中文词元 df/N 大于 5% 不参与打分（用户/域名/发布/英文这类常见词） */
-const RECALL_STOP_DF = 0.05;
-/** ASCII 整词判定（tokensOf 已小写）：豁免高频闸门，并独享单命中例外（见下方不对称说明） */
-const RECALL_ASCII = /^[a-z0-9]+$/;
-/** 条目少于 20 条时 df/N 没有统计意义（1 条就能占 10%），不启用高频词元闸门 */
-const RECALL_STOP_MIN_DOCS = 20;
-/** 单命中例外：只命中 1 个 ASCII 整词且 idf ≥ 3.5（staging/tauri 这类专名）才放行 */
-const RECALL_SINGLE_IDF = 3.5;
-
 /**
- * 召回第一阶段：只在索引行（meta.subject/title/toks）上算 BM25，绝不读 entries 正文。
+ * 召回第一阶段：候选行（状态/scope 合格）由 store 取，BM25 打分与排序在 ./src/recall。
  * 第二阶段由命中 id 的调用方按需 parseEntry；本函数只回 top 3 的 id/subject/title/score。
- *
- * 中文与 ASCII 两套规则为什么不对称：中文 bigram 切不出「专名」，域名/自己/岗位 这类通用词
- * 在 N=85 时 idf 也能到 3.5+，单命中放行几乎全是假阳性（「域名在哪里注册」召回 FoxyProxy 规则）；
- * 所以中文词元一律按 df/N > 5% 过滤，且不享受单命中例外。ASCII 整词是技术标识符
- * （npm/2fa/staging/tauri），出现频率高也仍有区分度，因此豁免高频闸门，并独享 idf ≥ 3.5 的单命中例外。
  */
-function recallFor(query: string, cwd?: string, excludeIds?: Set<string>): Array<{ id: string; subject: string; title: string; score: number }> {
-  const q = String(query ?? "").trim().slice(0, 200);
-  const qToks = tokensOf(q);
-  if (!q || !qToks.length) return [];
-  const configured = refreshConfig().recallMaxRows;
-  const maxRows = Number.isFinite(configured) && configured > 0 ? Math.floor(configured) : 20000;
-  // 语料口径 = 状态/scope 合格的全部条目；excludeIds（简报已展示）只影响输出，不参与 df/N 统计，
-  // 否则简报抽走几十条会把 df 压到 1，idf 虚高到 3.9，单命中例外就会放行通用词
-  const corpus = entryStore.list().filter(
-    (r) => RECALL_STATUS.has(r.meta.status ?? "") && inScope(r, cwd),
-  );
-  // 硬上限：行数超限时只取索引前 maxRows 行（索引按 id 倒序，即优先较新条目）
-  const degraded = corpus.length > maxRows;
-  const rows = degraded ? corpus.slice(0, maxRows) : corpus;
-  if (!rows.length) return [];
-  const docs = rows.map((row) => {
-    // 退化路径：超上限时只认 subject 词元（标题词元不参与），避免长尾行把打分拖慢
-    const toks = degraded ? tokensOf(row.meta.subject ?? "") : Array.isArray(row.toks) ? row.toks : [];
-    const tf = new Map<string, number>();
-    for (const t of toks) tf.set(t, (tf.get(t) ?? 0) + 1);
-    return { row, tf, dl: toks.length, sub: new Set(tokensOf(row.meta.subject ?? "")) };
-  });
-  const df = new Map<string, number>();
-  for (const d of docs) for (const t of qToks) if (d.tf.has(t)) df.set(t, (df.get(t) ?? 0) + 1);
-  const N = docs.length;
-  // 高频词元不参与打分：df/N > 5% 的中文词（用户/域名/发布/英文）区分度太低，留着只会把无关条目顶上来；
-  // ASCII 整词豁免（npm/2fa 在本库出现 >5% 但仍是技术标识符，过滤掉会把正确的 npm 条目一起弄丢）。
-  // 库里条目太少时比例没有统计意义（1 条就能占 10%），此时不过滤，交给下面的最少命中闸门。
-  const active =
-    N >= RECALL_STOP_MIN_DOCS
-      ? qToks.filter((t) => RECALL_ASCII.test(t) || (df.get(t) ?? 0) / N <= RECALL_STOP_DF)
-      : qToks;
-  if (!active.length) return [];
-  const avgdl = Math.max(1, docs.reduce((sum, d) => sum + d.dl, 0) / N);
-  const k1 = 1.2;
-  const b = 0.75;
-  const activeSet = new Set(active);
-  const scored = docs
-    .filter((d) => !excludeIds?.has(d.row.id))
-    .map((d) => {
-      let score = 0;
-      let hits = 0;
-      let maxIdf = 0;
-      let subHit = false;
-      let singleAscii = false;
-      // 命中数只数参与打分的词元：被高频闸门过滤的「英文」不算命中，否则它会替无关条目凑够 2 个
-      for (const t of qToks) {
-        const tf = d.tf.get(t);
-        if (!tf || !activeSet.has(t)) continue;
-        hits++;
-        singleAscii = RECALL_ASCII.test(t);
-        const dfi = df.get(t) ?? 0;
-        const idf = Math.log(1 + (N - dfi + 0.5) / (dfi + 0.5));
-        maxIdf = Math.max(maxIdf, idf);
-        const weight = (tf * (k1 + 1)) / (tf + k1 * (1 - b + (b * d.dl) / avgdl));
-        // subject 命中 ×3：索引行不另存 subject 专属 toks，命中时从 meta.subject 重切一次比对
-        score += idf * weight * (d.sub.has(t) ? 3 : 1);
-        if (d.sub.has(t)) subHit = true;
-      }
-      return { id: d.row.id, subject: d.row.meta.subject ?? "", title: d.row.title ?? "", score, hits, maxIdf, subHit, singleAscii };
-    })
-    // 最少命中：2 个不同词元；或 1 个 ASCII 专名且 idf ≥ 3.5（中文单命中一律不放行）
-    .filter((x) => x.score > 0 && (x.hits >= 2 || (x.hits === 1 && x.singleAscii && x.maxIdf >= RECALL_SINGLE_IDF)));
-  scored.sort((a, b2) => b2.score - a.score || Number(b2.subHit) - Number(a.subHit) || (a.id < b2.id ? 1 : -1));
-  return scored.slice(0, 3);
+function recallFor(
+  query: string,
+  cwd?: string,
+  excludeIds?: Set<string>,
+): Array<{ id: string; subject: string; title: string; score: number }> {
+  const corpus = entryStore.list().filter((r) => RECALL_STATUS.has(r.meta.status ?? "") && inScope(r, cwd));
+  return rankRecall(query, corpus, excludeIds);
 }
 
 /** 简报尾部召回段：固定格式、最多 3 条、整段 ≤300 字符 */
