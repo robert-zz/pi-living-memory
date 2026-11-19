@@ -1,15 +1,24 @@
 # Changelog
 
-## [Unreleased]
+## [0.2.0] - 2026-11-19
 
-重构与数据校验（未发版；对外行为除「写入非法字段被拒」外不变）。
+重构（对外行为除「写入非法字段被拒」外不变）。
 
-- 存储收口：EntryStore（含生命周期 `expire`/`resurrect`/`restore`/`purgeExpired`）、TodoStore、SummaryStore；索引与文件读写不再散落在策略层。
-- 注入层：`loadConfig()` 集中 28 个 `LIVING_MEMORY_*` 环境变量（8 个原「每次调用读」的点保留 `refreshConfig()` 语义）；`systemClock` 唯一持有墙上时钟，`setClock`/`setConfig` 供测试冻结；Logger 默认实现与旧行为一致。
+- 单文件拆为 12 个模块：壳 3719 → 955 行，业务下沉至 `src/`（config/text/paths/manifest/recall、三个 store、ops/brief/extract）。
+- Config/Clock/Logger 注入层：`loadConfig()` 集中 28 个 `LIVING_MEMORY_*` 环境变量；`systemClock` 唯一持有墙上时钟，`setClock`/`setConfig` 供测试冻结。
+- 三个 Store 收口各自文件与派生索引：EntryStore（含生命周期 `expire`/`resurrect`/`restore`/`purgeExpired`）、TodoStore、SummaryStore。
+- `readSettings`、`refreshWidget` 改注入，规避 jiti 下 `export let` 不跨模块传播。
+- `isNegation` 下移 `text.ts`，消除 ops↔brief 环；47 条 import 边全部严格层降，`src/**` 零顶层 IO。
+- 删除 20 个零调用点的 `@deprecated` 薄包装。
+
+数据校验：
+
 - **Manifest 校验**：新增 `validateManifest` 纯函数与 `parseEntryWithIssues`。读路径宽松（坏条目跳过但记录），写路径严格（`remember`/自动抽取拒绝非法字段并回原因），生命周期操作 `strict:false` 兼容历史数据。
 - `source=lint` 增加「结构问题」段：缺 id、非法 kind/status/日期/scope/action_impact/confidence、frontmatter 缺失或未闭合、同 id 多文件；按 severity 排序，最多 20 条并给总数。
 - 开屏 hints 新增结构问题计数（受 `LIVING_MEMORY_START_HINTS` 控制）。
-- 测试：194 → 206 断言、41 → 45 用例（新增 `manifest-invalid` / `manifest-frontmatter` / `manifest-legacy-lenient` / `manifest-extract-guard`）。
+
+测试：194 → 230 断言、41 → 44 用例。
+
 
 ## [0.1.14] - 2026-11-18
 
