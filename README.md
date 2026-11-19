@@ -30,7 +30,7 @@ Behavior, design trade-offs and the pitfalls we hit are documented in Chinese be
 
 Pi 扩展：**带生命周期的长期记忆**。事实不再是散文段落，而是有 `kind / status / scope / 过期 / 复核 / 证据来源` 的条目；工程实况与待办另有 `summary.md` / `todo.md` 两个文档面；三者各有一份派生索引，让每轮注入的上下文体积与库的规模脱钩。
 
-**文档**：[使用说明](docs/guide.md)（记什么/怎么查/怎么清） · [架构与数据流](docs/architecture.md)（架构图·时序图·状态机） · [演进路线](docs/roadmap.md)
+**文档**：[使用说明](https://github.com/robert-zz/pi-living-memory/blob/main/docs/guide.md)（记什么/怎么查/怎么清） · [架构与数据流](https://github.com/robert-zz/pi-living-memory/blob/main/docs/architecture.md)（架构图·时序图·状态机） · [演进路线](https://github.com/robert-zz/pi-living-memory/blob/main/docs/roadmap.md) · [开发与发布](https://github.com/robert-zz/pi-living-memory/tree/main/docs)
 
 > **装之前请先读：它默认会做的事**
 >
@@ -56,6 +56,8 @@ pi install /path/to/pi-living-memory
 ```
 
 **只能有一份实例**：装成包之后要删掉 `~/.pi/agent/extensions/living-memory.ts`，否则两份同时注册 `living_memory` / `remember`，`/memory` 会变成 `memory:1` / `memory:2`，两套内存缓存还会互相看不见对方的写入。
+
+**改 `settings.json` 的 packages、增删扩展文件后要重启 pi**，光 `/reload` 不会清掉旧实例的注册。日常改代码用 `/reload` 就够。
 
 `pi list` 查看 / `pi remove <source>` 卸载。本地目录装的包**不会被 npm install**，依赖仍由宿主提供。
 
@@ -235,21 +237,6 @@ bun tests/run.ts --list
 
 每个用例一个临时 `HOME` + 独立子进程（扩展在加载期定 `$HOME/.pi/agent/memory`，不隔离就会写到真库）。被测件默认取包内 `extensions/living-memory.ts`；`LIVING_MEMORY_SRC=/path/to/x.ts` 可指向开发副本。依赖通过 `tests/under-test/node_modules` 软链到最新 pi 安装目录解析。
 
-## 开发轨
-
-**单一来源**：`extensions/living-memory.ts`（本仓）。`~/.pi/agent/extensions/` 下不再保留副本——两份实例会各自缓存索引与文件状态，互相看不见对方的写入（曾经把大写 `summary.md` 写回来一次）。
-
-日常循环：
-
-```bash
-cd /path/to/pi-living-memory
-# 改 extensions/living-memory.ts
-bun tests/run.ts          # 44 用例 / 230 断言，跑在临时 HOME，不碰真库
-/reload                   # 包路径就是本目录，pi 重新读盘即生效
-git commit -am "..." && git tag v0.1.x
-```
-
-`/reload` 只重载模块；**删/加扩展文件、改 `settings.json` 的 packages 后必须重启 pi**，否则旧实例的注册不会消失（表现为 `/memory:1`、`/memory:2`）。
 
 ## 升级与回滚
 
@@ -260,61 +247,16 @@ pi install git:github.com/robert-zz/pi-living-memory@v0.1.14   # 退回旧 tag
 
 包升级只换代码，`~/.pi/agent/memory` 原样保留；`/reload` 即可生效。
 
-## 发布到 npm
+## 数据安全承诺
 
-```bash
-npm login --auth-type=web     # 浏览器完成登录（CLI 侧不再要求本地 OTP）
-npm pack --dry-run            # 看清单与体积（0.2.0：493 KB / 38 个文件）
-npm version patch             # bump 版本（已发布版本不可覆盖）
-npm stage publish             # 只是暂存；发布见下节「2FA 与 staged publishing」
-```
+- **过期不等于删除**：失效条目进 `expired/`、每次写入留 `recovery/` 快照，都靠轮转清理而非直接删；误删可 `restore`。
+- **推断有闸门**：`kind=relation` 与 `action_impact=needs-confirm` 永不自动转事实，只能人工 `confirm`。
+- **派生索引可重建**：`index.json` 等三份索引删掉不丢数据，绝不作为事实源。
 
-发布前确认四件事：
+## 深入文档
 
-1. `package.json` **不能有** `"private": true`；
-2. `typebox` / `@earendil-works/*` 只能在 `peerDependencies`（`"*"`）里，**不能进 `dependencies`**——物理副本会绕过 pi 的模块映射（`docs/packages.md:114`）；
-3. 版本号必须 bump（同版本重发会被 registry 拒绝，已发布版本删不掉，只能 `npm deprecate`）；
-4. 包名可用：`curl -s -o /dev/null -w '%{http_code}\n' https://registry.npmjs.org/pi-living-memory`，`404` 才是空闲。
-
-`keywords` 里有 `pi-package` 就会出现在 [pi.dev/packages](https://pi.dev/packages) 的 gallery。发布后 `pi install npm:pi-living-memory@<版本>` 验证，再把 `settings.json` 里的本地路径条目换成 npm spec——两者并存会造成“源码改了、装的是旧行为”的错觉。
-
-
-### 2FA 与 staged publishing（2025 年后必读）
-
-npm 已于 2025 年停止**新增** TOTP：`npm profile enable-2fa` 会返回
-`404 – Adding a new TOTP 2FA is no longer supported`，只剩安全密钥 / Passkey（WebAuthn）。而发布规则变成“**发布必须带 2FA，或带 bypass-2FA 的 granular token**”，且 bypass token **只能暂存、不能直发**：
-
-```
-npm publish        → 403 E_STAGE_REQUIRED
-                     "this token can only publish to a staging area"
-npm stage publish  → 成功，输出 staged id
-npm stage approve  → 需要 2FA（proof-of-presence），由浏览器完成
-```
-
-因此**首次发布在无硬件密钥时的唯一路径**是「电脑 stage + 手机 approve」：
-
-1. 电脑：`npm stage publish`（bypass-2FA granular token 写进 `~/.npmrc`）
-2. 终端报 `EOTP` 并打印 `https://www.npmjs.com/auth/cli/<id>`（TTY 下才完整显示，管道里会被打码成 `***`）
-3. 手机 Chrome **先登录 npmjs**（未登录会被重定向回首页），再打开该链接，用 passkey 确认
-4. 终端保持运行（它每几秒轮询 `/-/v1/done?authId=…`），成功后打印 `+ pi-living-memory@<版本>`
-
-四个实测过的坑：
-
-- **链接 60 秒级过期**：复制到手机再打开要快，超时就重跑命令拿新 authId；
-- **别扫码**：Linux 版 Chrome 没有实现 hybrid/caBLE，「手机当安全密钥」在桌面上必然连不上（与本机 IPv6/局域网无关）；
-- **`approve` 在 `validating` 期间报 `404 staged version not found`**：等 `npm stage list` 里状态变成 `staged`（扫描校验通常 1–3 分钟）再 approve；
-- **暂存版本与已发布版本共用版本号空间**：暂存了 0.1.10 就不能再发 0.1.10，丢弃用 `npm stage reject <id>`。
-
-stage 与 approve 是两次独立请求，可分布在不同设备：**stage 跟着源码走，approve 跟着你的认证器走**。有 USB 安全密钥时两者都在电脑；CI（GitHub Actions）可以 stage，人在手机上 approve——这正是 staged publishing 的设计意图。
-
-`npm stage list [<pkg>]` 查看、`npm stage view <id>` 看详情、`npm stage download <id>` 取回 tarball 做检查。
-
-
-## 设计约束（改代码前请先读）
-
-1. **派生数据永不作事实源**：索引坏了就重建，绝不用索引反推条目。
-2. **写路径必须有锁**：`summary.md` / `todo.md` 的读—改—写包在跨进程 `.lock`（O_EXCL，陈旧锁 30s 接管，最长等 3s）。
-3. **简报有硬上限**：任何新增注入内容都要进分档预算，不得直接拼接。
-4. **自动转正有闸门**：`inference` → `confirmed` 有两条自动路径（置信度 ≥0.85、证据 ≥3 天且复合分 ≥0.80），但 `kind=relation` 与 `action_impact=needs-confirm` **永自动**，只能人工 `confirm`；面板与人工干预流程不变。
-5. **过期不删数据**：`expired/` 与 `recovery/` 都靠轮转而非删除清理。
-6. **读宽松、写严格**：frontmatter 校验在读路径只记录不阻断，写路径拒绝非法字段，生命周期操作对历史快照放宽（见「数据校验与 lint」）。
+- [使用说明](https://github.com/robert-zz/pi-living-memory/blob/main/docs/guide.md)：记什么 / 怎么查 / 怎么清
+- [架构与数据流](https://github.com/robert-zz/pi-living-memory/blob/main/docs/architecture.md)：架构图、时序图、状态机
+- [开发轨与设计约束](https://github.com/robert-zz/pi-living-memory/blob/main/docs/development.md)：模块结构、jiti 的坑、改代码前必读的六条约束
+- [发布到 npm](https://github.com/robert-zz/pi-living-memory/blob/main/docs/publishing.md)：维护者向，含 2FA 与 staged publishing 全流程
+- [演进路线](https://github.com/robert-zz/pi-living-memory/blob/main/docs/roadmap.md)

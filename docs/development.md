@@ -1,0 +1,56 @@
+# 开发轨
+
+本文写给**要改这个包代码的人**。只想使用，看 [README](../README.md) 就够。
+
+## 单一来源
+
+`extensions/living-memory.ts`（本仓）+ `extensions/src/` 下的模块。`~/.pi/agent/extensions/` 下**不再保留副本**——两份实例会各自缓存索引与文件状态，互相看不见对方的写入（曾经把大写 `summary.md` 写回来一次）。
+
+模块结构（0.2.0 起）：
+
+```
+extensions/living-memory.ts      壳：pi 注册、工具 schema、事件接线
+  src/config.ts                  Config/Clock/Logger 注入层
+  src/text.ts                    纯文本工具（无 IO）
+  src/paths.ts                   路径常量 + 文件原语（顶层零 IO）
+  src/manifest.ts                frontmatter 解析与校验
+  src/recall.ts                  BM25 打分（纯函数）
+  src/stores/{entry,todo,summary}-store.ts
+  src/ops.ts                     治理动作
+  src/brief.ts                   简报装配
+  src/extract.ts                 自动抽取
+```
+
+依赖按层单向：`config → text/paths → manifest → recall/stores → ops → brief → extract → 壳`。每条 import 边的层号严格递减，因此不可能成环。pi 用 jiti 加载扩展，相对 import 不带扩展名即可，**不需要打包步骤**。
+
+## 日常循环
+
+```bash
+cd /path/to/pi-living-memory
+# 改 extensions/ 下的代码
+bun tests/run.ts          # 44 用例 / 230 断言，跑在临时 HOME，不碰真库
+/reload                   # 包路径就是本目录，pi 重新读盘即生效
+git commit -am "..." && git tag v0.x.y
+```
+
+`/reload` 只重载模块；**删/加扩展文件、改 `settings.json` 的 packages 后必须重启 pi**，否则旧实例的注册不会消失（表现为 `/memory:1`、`/memory:2`）。
+
+## 两个 jiti 相关的坑
+
+1. **`export let` 的重新赋值不跨模块传播**。`readSettings` 若直接搬走，其它模块拿到的是初始值而不是后续赋的值。解法：`config.setSettingsReader(fn)` 注入，壳在 `default(pi)` 首行设置。
+2. **模块级 const 与插件闭包**。写在 `export default` 闭包里的 `const` 对模块级函数不可见，引用会 `ReferenceError`——而这个错误会被 `before_agent_start` 的 try/catch 吞掉，表现为**简报静默变空**。共享的函数与常量一律放模块作用域。
+
+## 设计约束（改代码前请先读）
+
+1. **派生数据永不作事实源**：索引坏了就重建，绝不用索引反推条目。
+2. **写路径必须有锁**：`summary.md` / `todo.md` 的读—改—写包在跨进程 `.lock`（O_EXCL，陈旧锁 30s 接管，最长等 3s）。
+3. **简报有硬上限**：任何新增注入内容都要进分档预算，不得直接拼接。
+4. **自动转正有闸门**：`inference` → `confirmed` 有两条自动路径（置信度 ≥0.85、证据 ≥3 天且复合分 ≥0.80），但 `kind=relation` 与 `action_impact=needs-confirm` **永不自动**，只能人工 `confirm`。
+5. **过期不删数据**：`expired/` 与 `recovery/` 都靠轮转而非删除清理。
+6. **读宽松、写严格**：frontmatter 校验在读路径只记录不阻断，写路径拒绝非法字段，生命周期操作对历史快照放宽。
+
+## 测试组织
+
+`tests/` 下每个用例一个临时 `HOME` + 独立子进程。新增行为请补用例，尤其是「静默失败」类——上面那个闭包作用域 bug 就是被一条画像断言意外抓出来的，否则会一直潜伏。
+
+发版见 [publishing.md](./publishing.md)。
