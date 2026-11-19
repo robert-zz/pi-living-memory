@@ -1,6 +1,6 @@
 /**
  * frontmatter 解析与 manifest 校验：纯函数 + 单文件读（读发生在调用时，模块顶层不碰 IO）。
- * STORE/ENTRIES_DIR 等路径常量留在主文件，所以这里不做路径归一化——调用方传已算好的库内相对 label。
+ * 路径常量在 ./paths（L1），所以这里不做路径归一化——调用方传已算好的库内相对 label。
  */
 import * as fs from "node:fs";
 import { tokensOf } from "./text";
@@ -72,7 +72,7 @@ export function parseEntryWithIssues(file: string, label: string): { entry: Entr
  * error = 字段值会让条目落进错误语义（丢索引、永进不了简报、NaN 排序、写进错误 scope 层），写入时必须拒；
  * warn = 现状可运行但可疑（scope 为空读路径按 global 处理，不算坏数据）。
  * 可选字段缺失一律不报（supersedes/evidence/source 等本就可空）。
- * opts.file 是展示用 label；缺省时按 entries/<id>.md 生成（与 STORE 下的相对路径同形）。
+ * opts.file 是展示用 label；缺省时按 entries/<id>.md 生成（与 paths.ts 的 STORE 下相对路径同形）。
  */
 export function validateManifest(meta: Meta, opts: { file?: string; requireId?: boolean } = {}): ManifestIssue[] {
   const file = opts.file ?? (meta.id ? `entries/${meta.id}.md` : "");

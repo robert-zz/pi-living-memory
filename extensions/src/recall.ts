@@ -1,6 +1,6 @@
 /**
  * 按问题召回：索引行上的 BM25，命中后才由调用方读正文。
- * 纯计算：给定「候选索引行 + 查询」→ 排序后的 top 3。候选从哪来（entryStore.list + scope 过滤）归主文件，
+ * 纯计算：给定「候选索引行 + 查询」→ 排序后的 top 3。候选从哪来（entryStore.list + scope 过滤）归 ops，
  * 本模块不 import store、不做 IO。
  */
 import { refreshConfig } from "./config";

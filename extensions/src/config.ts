@@ -3,7 +3,7 @@
  * 策略层原先把「环境变量 / 墙上时钟 / 日志」三件事隐式依赖到进程里；这里改成显式注入，行为与原先逐一对齐：
  * 默认实现仍是同一套读 env、同一套 Date.now()、同一套写盘，只是调用点不再直接摸它们，测试可以换掉。
  *
- * 本模块是依赖图的最底层：不 import 任何本地模块（IO 与 STORE 路径归主文件）。
+ * 本模块是依赖图的最底层（L0）：不 import 任何本地模块；IO 与路径常量归 ./paths（L1）。
  * cfg / clock / logger 都是稳定引用、内部可变：jiti 加载多文件时，`export let` 的重新赋值不会传播到
  * 别的模块，所以注入只改对象内部（Object.assign / 换活动实现），保证所有模块看到同一份状态。
  */
@@ -149,7 +149,7 @@ export interface Logger {
   debug(msg: string): void;
   warn(msg: string): void;
 }
-/** 默认落点：主文件在定义完 appendActivityLog/appendDebugLog 后注入（它们依赖 STORE 与轮转，IO 归主文件） */
+/** 默认落点：扩展壳在定义完 appendActivityLog/appendDebugLog 后注入（它们依赖 STORE 与轮转，IO 归壳） */
 let logSink: Logger = {
   activity: () => {},
   debug: () => {},
@@ -164,4 +164,23 @@ export const logger: Logger = {
 /** 测试/宿主注入：接管日志输出（例如断言「记了哪几条审计」而不落盘） */
 export function setLogger(l: Logger): void {
   logSink = l;
+}
+
+/**
+ * settings.json 读取器：`pi.getSettings` 只在 default(pi) 里拿得到，模块级函数拿不到实例。
+ * 这里持有的是同模块内的 `let`（不是 `export let`）：jiti 加载多文件时 `export let` 的重新赋值不跨模块传播，
+ * 所以读函数与写函数必须住在同一个模块里，壳只调 setSettingsReader。
+ */
+let settingsReader: (() => any) | null = null;
+/** 壳在 default(pi) 首行注入：() => pi.getSettings?.() ?? null */
+export function setSettingsReader(fn: (() => any) | null): void {
+  settingsReader = fn;
+}
+/** 读 settings：读器缺失/抛错一律返回 null（调用方按「设置没表态」处理） */
+export function getSettings(): any {
+  try {
+    return settingsReader?.() ?? null;
+  } catch {
+    return null;
+  }
 }

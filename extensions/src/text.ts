@@ -73,3 +73,17 @@ export function jaccard(a: Set<string>, b: Set<string>): number {
   for (const x of a) if (b.has(x)) inter++;
   return inter / (a.size + b.size - inter);
 }
+
+/** 负面偏好标记：这类条目在简报里优先，并打 [雷区] 标签 */
+const NEGATION_RE = /(不要|别把|别再|禁止|不得|避免|切勿|勿|never|don'?t|avoid)/i;
+export function isNegation(e: { meta: any; title?: string }): boolean {
+  return NEGATION_RE.test(`${e.meta?.subject ?? ""} ${e.title ?? ""}`);
+}
+
+/** pi 消息 → 纯文本（content 可能是字符串或 text 块数组）；会话形状由宿主决定，不认的形状返回空串 */
+export function textOf(m: any): string {
+  const c = m?.content;
+  if (typeof c === "string") return c;
+  if (Array.isArray(c)) return c.filter((b: any) => b?.type === "text").map((b: any) => b.text).join(" ");
+  return "";
+}
