@@ -17,7 +17,11 @@
   "keywords": [
     "pi-package",
     "memory",
-    "assistant"
+    "assistant",
+    "long-term-memory",
+    "agent-memory",
+    "context-management",
+    "llm"
   ],
   "license": "MIT",
   "type": "module",
