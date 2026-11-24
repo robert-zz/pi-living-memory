@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.2] - 2026-11-24
+
+召回基准与抽取内部拆分（**对外行为零变化**：运行日志与抽取配额不变）。
+
+- 新增 `benchmarks/`：59 题真实召回基准，覆盖精确事实、当前状态、历史变化、项目隔离、否定约束、无答案拒答六类；输出 Recall@3/5、MRR@3、拒答准确率与检索耗时、读盘字节、注入字符。
+- `--extract` 抽取决策回放：32 案金标夹具（`extract-gold.jsonl`），只测解析、归一、冲突与配额，不联网；报告型，不进发布门禁。
+- 基线门禁：Recall@3 相对 `baseline.json` 退化 ≥5% 阻断；拒答相对基线 −5pp 阻断；`--update-baseline` 重录基线。
+- `extract.ts` 拆出 `conversationText` / `extractionSystemPrompt` / `parseExtractionOutput` / `normalizeExtractionItems` / `decideExtractionBatch` 五个纯函数，`runExtraction` 收为 IO 外壳；**日志与配额不变**。
+- fix(bench)：Bun 进程内缓存 `os.homedir()` 导致 `--memory` 快照隔离失效，改为运行时替换 `homedir()`。
+- 测试 44 用例 / 230 断言 → 61 用例 / 275 断言（新增 `rankRecall` 的 `k` 参数与抽取纯函数用例）。
+- 文档：`docs/roadmap.md` 同步 v0.2.x（召回基准、可观测、工程项）与 v0.3 分域抽取规划。
+
 ## [0.2.1] - 2026-11-19
 
 结构调整优化（**对外行为零变化**，真库副本输出 10835 字节逐字节一致）。

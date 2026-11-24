@@ -21,7 +21,7 @@ per-turn prompt cost stays flat as the library grows.
 - **Before installing, know the defaults**: it writes `~/.pi/agent/memory/`, and by default
   sends the tail of each conversation to *your own* model provider for memory extraction
   (`LIVING_MEMORY_EXTRACT=0` disables). The Chinese section below spells out every side effect.
-- **Tests**: `bun tests/run.ts` — 44 cases / 230 assertions against a temporary HOME, never your real store.
+- **Tests**: `bun tests/run.ts` — 61 cases / 275 assertions against a temporary HOME, never your real store.
 - **Dependencies**: `typebox` and `@earendil-works/*` are host-provided. They are declared as
   `peerDependencies` and never bundled (a physical copy would bypass Pi's module mapping).
 
@@ -49,7 +49,7 @@ Pi 扩展：**带生命周期的长期记忆**。事实不再是散文段落，�
 pi install npm:pi-living-memory
 
 # git（钉 tag，可回滚）
-pi install git:github.com/robert-zz/pi-living-memory@v0.2.0
+pi install git:github.com/robert-zz/pi-living-memory@v0.2.2
 
 # 本地目录（开发用，不复制）
 pi install /path/to/pi-living-memory
@@ -230,7 +230,7 @@ score = confidence × 0.40        # 自评最多 40%
 ## 测试
 
 ```bash
-bun tests/run.ts            # 全部（44 用例 / 230 断言，约 4s）
+bun tests/run.ts            # 全部（61 用例 / 275 断言，约 4s）
 bun tests/run.ts --only brief
 bun tests/run.ts --list
 ```
