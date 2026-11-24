@@ -108,7 +108,7 @@ export function extractHealthText(): string {
   ].join("\n");
 }
 
-function conversationText(msgs: any[]): string {
+export function conversationText(msgs: any[]): string {
   const parts: string[] = [];
   for (const m of msgs) {
     if (m?.role !== "user" && m?.role !== "assistant") continue;
@@ -143,7 +143,7 @@ async function resolveApiKey(ctx: any, model: any): Promise<string | undefined> 
   return undefined;
 }
 
-function extractionSystemPrompt(existing: string): string {
+export function extractionSystemPrompt(existing: string): string {
   return [
     "你是长期记忆抽取器（Today 记忆契约）。从对话中抽取「跨会话仍有价值」的记忆候选。",
     "准入五类：稳定偏好 / 进行中承诺或截止 / 关系信息 / 用户纠正 / 决策与行动结果。",
@@ -151,6 +151,96 @@ function extractionSystemPrompt(existing: string): string {
     existing ? `已知活动条目（勿重复抽取；仅当对话明确纠正既有事实时抽 correction）：\n${existing}` : "当前无既有条目。",
     '只输出 JSON 数组（无任何其它文字），每项 {"kind":"preference|constraint|commitment|relation|correction|decision|outcome","subject":"说谁/什么","text":"1-3 句事实","confidence":0-1}。最多 3 项；无可抽取内容输出 []。',
   ].join("\n");
+}
+
+/** 解析结果：失败只回 code/detail，模型 id 与 reason 由壳拼接后再写抽取失败台账 */
+export type ParsedExtraction =
+  | { ok: true; value: unknown }
+  | { ok: false; code: "empty-response" | "no-json" | "parse-failed"; detail: string };
+
+/**
+ * 纯解析：空回包 → empty-response；剥 ```json 围栏后取首个 `[` 到末个 `]`，找不到 → no-json；
+ * JSON.parse 抛错 → parse-failed。成功时 value 是 unknown：是不是数组、字段合不合法交给 normalize。
+ */
+export function parseExtractionOutput(out: string): ParsedExtraction {
+  const text = String(out ?? "");
+  if (!text.trim()) return { ok: false, code: "empty-response", detail: "" };
+  let raw = text;
+  const fence = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fence) raw = fence[1];
+  const l = raw.indexOf("[");
+  const r = raw.lastIndexOf("]");
+  if (l < 0 || r <= l) return { ok: false, code: "no-json", detail: `回包里找不到 JSON 数组：${text.slice(0, 120)}` };
+  try {
+    return { ok: true, value: JSON.parse(raw.slice(l, r + 1)) };
+  } catch {
+    return { ok: false, code: "parse-failed", detail: `JSON 解析失败：${raw.slice(l, l + 120)}` };
+  }
+}
+
+export type ExtractionCandidate = { kind: string; subject: string; body: string; confidence: number };
+/** 批内被弃的原因：kind/subject/body=字段不过闸，self-ref=讲插件自身，duplicate=同批完全重复（只留首条） */
+export type ExtractionSkipReason = "kind" | "subject" | "body" | "self-ref" | "duplicate";
+export type NormalizedExtraction = {
+  candidates: ExtractionCandidate[];
+  skipped: Array<{ reason: ExtractionSkipReason; kind: string; subject: string }>;
+};
+
+/**
+ * 纯归一：只认前 3 项（配额）· kind 必须在 KINDS 内 · subject/body trim 后非空 ·
+ * confidence 夹到 [0,1]（缺省 0.6）· 自指 subject 不立条目 · 同批同 kind+subject+body 只留首条。
+ * 非数组一律空转（坏回包不报错，由壳按「0 条」继续）。
+ */
+export function normalizeExtractionItems(value: unknown): NormalizedExtraction {
+  const candidates: ExtractionCandidate[] = [];
+  const skipped: NormalizedExtraction["skipped"] = [];
+  if (!Array.isArray(value)) return { candidates, skipped };
+  for (const item of value.slice(0, 3)) {
+    const kind = String(item?.kind ?? "");
+    const subject = String(item?.subject ?? "").trim();
+    const body = String(item?.text ?? "").trim();
+    const confidence = Math.min(Math.max(Number(item?.confidence ?? 0.6), 0), 1);
+    if (!(KINDS as readonly string[]).includes(kind)) {
+      skipped.push({ reason: "kind", kind, subject });
+      continue;
+    }
+    if (!subject) {
+      skipped.push({ reason: "subject", kind, subject });
+      continue;
+    }
+    if (!body) {
+      skipped.push({ reason: "body", kind, subject });
+      continue;
+    }
+    // 自指过滤：讲插件自身实现/参数的候选不立条目（归 summary），避免「开发过程」污染个人记忆层
+    if (isPluginInternal(subject)) {
+      skipped.push({ reason: "self-ref", kind, subject });
+      continue;
+    }
+    if (candidates.some((c) => c.kind === kind && c.subject === subject && c.body === body)) {
+      skipped.push({ reason: "duplicate", kind, subject });
+      continue;
+    }
+    candidates.push({ kind, subject, body, confidence });
+  }
+  return { candidates, skipped };
+}
+
+/** 单条候选的落库分流：create=照常新建（或待确认推断），conflict=库内已有同 kind+subject 且正文相似的活动条目 */
+export type ExtractionDecision = { candidate: ExtractionCandidate; verdict: "create" | "conflict" };
+
+/**
+ * 纯决策：只把「是否与既有条目冲突」交给注入的查找函数，批次内不读盘、不写盘。
+ * runExtraction 注入 entryStore.findConflicting；测试注入固定布尔表即可覆盖 create/conflict 分流。
+ */
+export function decideExtractionBatch(
+  candidates: ExtractionCandidate[],
+  findConflicting: (kind: string, subject: string, body: string) => boolean,
+): ExtractionDecision[] {
+  return candidates.map((candidate) => ({
+    candidate,
+    verdict: findConflicting(candidate.kind, candidate.subject, candidate.body) ? "conflict" : "create",
+  }));
 }
 
 let extractionInFlight = false;
@@ -203,47 +293,39 @@ async function runExtraction(text: string, ctx: any, reason: string): Promise<vo
       .join("\n")
       .trim();
     logger.debug(`extraction raw out: ${JSON.stringify(out).slice(0, 300)}`);
-    if (!out) {
-      noteExtractFailure("empty-response", `model=${model.id} 回包无文本（${reason}）`);
+    const parsed = parseExtractionOutput(out);
+    if (!parsed.ok) {
+      // 失败文案与拆分前逐字一致：空回包补模型 id，解析失败补原因，无数组直接用片段
+      const detail =
+        parsed.code === "empty-response"
+          ? `model=${model.id} 回包无文本（${reason}）`
+          : parsed.code === "parse-failed"
+            ? `${parsed.detail}（${reason}）`
+            : parsed.detail;
+      noteExtractFailure(parsed.code, detail);
       return;
     }
-    let raw = out;
-    const fence = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
-    if (fence) raw = fence[1];
-    const l = raw.indexOf("[");
-    const r = raw.lastIndexOf("]");
-    if (l < 0 || r <= l) {
-      noteExtractFailure("no-json", `回包里找不到 JSON 数组：${out.slice(0, 120)}`);
-      return;
-    }
-    let items: any;
-    try {
-      items = JSON.parse(raw.slice(l, r + 1));
-      logger.debug(`parsed ${Array.isArray(items) ? items.length : "non-array"} items`);
-    } catch {
-      noteExtractFailure("parse-failed", `JSON 解析失败：${raw.slice(l, l + 120)}（${reason}）`);
-      return;
-    }
+    logger.debug(`parsed ${Array.isArray(parsed.value) ? parsed.value.length : "non-array"} items`);
+    const { candidates, skipped } = normalizeExtractionItems(parsed.value);
+    for (const s of skipped)
+      if (s.reason === "self-ref")
+        logger.activity(`auto-extract skipped self-ref kind=${s.kind} subject=${s.subject} (${reason})`);
     let n = 0;
-    for (const item of Array.isArray(items) ? items.slice(0, 3) : []) {
-      const kind = String(item?.kind ?? "");
-      const subject = String(item?.subject ?? "").trim();
-      const body = String(item?.text ?? "").trim();
-      const conf = Number(item?.confidence ?? 0.6);
-      if (!(KINDS as readonly string[]).includes(kind) || !subject || !body) continue;
-      // 自指过滤：讲插件自身实现/参数的候选不立条目（归 summary），避免「开发过程」污染个人记忆层
-      if (isPluginInternal(subject)) {
-        logger.activity(`auto-extract skipped self-ref kind=${kind} subject=${subject} (${reason})`);
-        continue;
-      }
-      const dup = entryStore.findConflicting(kind, subject, body);
-      if (dup) {
+    const decisions = decideExtractionBatch(
+      candidates,
+      (kind, subject, body) => entryStore.findConflicting(kind, subject, body) !== null,
+    );
+    for (const { candidate, verdict } of decisions) {
+      const { kind, subject, body, confidence } = candidate;
+      if (verdict === "conflict") {
         // 同一推断再次被抽取到：算一次复现证据（不新建条目，不改 confidence）
-        if (dup.meta.status === "inference")
+        // verdict 只带布尔，复现证据需要条目本体，只在冲突这条少数路径上再取一次
+        const dup = entryStore.findConflicting(kind, subject, body);
+        if (dup?.meta.status === "inference")
           appendEvidence(dup, { at: new Date(clock.now()).toISOString(), kind: "repeat", id: `extract-${reason}`, note: "抽取器再次命中同一事实" });
         continue;
       }
-      const autoFact = autoFactable(kind, conf, "advice-only");
+      const autoFact = autoFactable(kind, confidence, "advice-only");
       const id = newId();
       const meta: Meta = {
         id,
@@ -256,7 +338,7 @@ async function runExtraction(text: string, ctx: any, reason: string): Promise<vo
         confirmed_at: autoFact ? new Date(clock.now()).toISOString() : "",
         expires_at: "",
         review_after: new Date(clock.now() + 14 * 86400e3).toISOString().slice(0, 10),
-        confidence: String(Math.min(Math.max(conf, 0), 1)),
+        confidence: String(confidence),
         action_impact: "advice-only",
         supersedes: "",
         superseded_by: "",

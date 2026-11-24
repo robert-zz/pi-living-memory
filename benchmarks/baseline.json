@@ -1,0 +1,11 @@
+{
+  "generated_at": "2026-11-24T09:23:31.442Z",
+  "git_head": "e35c7be2c1a7a0a65273cf84ba459d68758b5e3b",
+  "entry_count": 208,
+  "question_count": 59,
+  "recall_at_3": 0.8962264150943396,
+  "recall_at_5": 0.8962264150943396,
+  "mrr_at_3": 0.8333333333333333,
+  "refusal_accuracy": 0.5,
+  "brief_chars_mean": 1152.864406779661
+}

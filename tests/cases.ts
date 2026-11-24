@@ -51,9 +51,26 @@ export const CASES: Meta[] = [
   { id: "recall-single-token", title: "召回：单命中只认 ASCII 专名（idf ≥3.5）", seed: "basic" },
   { id: "recall-hitcount", title: "召回：被过滤词元不计入最少命中数", seed: "basic" },
   { id: "recall-ascii-short", title: "召回：2 字母技术缩写白名单（ai/ci/pr/ui/db/ss）", seed: "basic" },
+  { id: "recall-k1", title: "召回：k=1 只回排序首条", seed: "basic" },
+  { id: "recall-k3", title: "召回：k=3 与默认口径一致", seed: "basic" },
+  { id: "recall-k5", title: "召回：k=5 返回完整排序前缀", seed: "basic" },
+  { id: "recall-k-over", title: "召回：k 大于候选数时返回全部", seed: "basic" },
   { id: "miss-log", title: "零命中：写 miss.log / 命中不写 / 开关关闭", seed: "basic" },
   { id: "clock-freeze", title: "时钟：冻结时钟决定到期分档（策略走注入 Clock）", seed: "basic" },
   { id: "config-inject", title: "配置：setConfig 改简报上限，还原后一致", seed: "bulk" },
+  { id: "extract-parse-empty", title: "抽取解析：空/纯空白回包 → empty-response", seed: "empty" },
+  { id: "extract-parse-fence", title: "抽取解析：剥 ```json 围栏", seed: "empty" },
+  { id: "extract-parse-array", title: "抽取解析：[] 与数组 ok:true", seed: "empty" },
+  { id: "extract-parse-no-json", title: "抽取解析：找不到数组 → no-json", seed: "empty" },
+  { id: "extract-parse-bad-json", title: "抽取解析：坏 JSON → parse-failed", seed: "empty" },
+  { id: "extract-normalize-nonarray", title: "抽取归一：非数组/非对象空转", seed: "empty" },
+  { id: "extract-normalize-cap", title: "抽取归一：配额最多 3 条", seed: "empty" },
+  { id: "extract-normalize-invalid", title: "抽取归一：非法 kind / 空 subject / 空 body", seed: "empty" },
+  { id: "extract-normalize-selfref", title: "抽取归一：自指 subject 不立条目", seed: "empty" },
+  { id: "extract-normalize-confidence", title: "抽取归一：confidence 夹取 + 同批去重", seed: "empty" },
+  { id: "extract-decide-split", title: "抽取决策：create/conflict 分流（注入查找函数）", seed: "empty" },
+  { id: "extract-decide-isolated", title: "抽取决策：单条冲突不影响其它候选", seed: "empty" },
+  { id: "extract-decide-empty", title: "抽取决策：candidates 为空返回空且不查库", seed: "empty" },
 ];
 
 const fmText = (fields: Record<string, string>, body: string) =>
@@ -92,6 +109,16 @@ const addFillers = (home: string, n: number) => {
 const recallOf = async (L: any, prompt: string) => {
   const r: any = await L.handlers.before_agent_start({ systemPrompt: "BASE", prompt }, mkCtx("/work/acme"));
   return recallSeg(String(r?.systemPrompt ?? ""));
+};
+
+/** rankRecall k 用例夹具：6 条同主题条目，每条都命中 npm/staging/发布，k 可从 1 拉到 6 */
+const recallKCorpus = async () => {
+  const { tokensOf } = await import("./under-test/src/text.ts");
+  return ["发布流程", "发布回滚", "发布检查", "发布记录", "发布清单", "发布演练"].map((tail, i) => {
+    const id = `20260101-00000${i}-k${String(i).padStart(3, "0")}`;
+    const subject = `npm staging ${tail}`;
+    return { id, meta: { id, status: "explicit", subject }, title: subject, toks: tokensOf(`${subject} ${subject}`) };
+  });
 };
 
 async function body(id: string, home: string) {
@@ -891,6 +918,42 @@ async function body(id: string, home: string) {
       ok("非白名单 2 字母词不进索引（只剩中文单命中，不召回）", qa === "", qa.slice(0, 80));
       return;
     }
+    case "recall-k1": {
+      const { rankRecall } = await import("./under-test/src/recall.ts");
+      const corpus = await recallKCorpus();
+      const full = rankRecall("npm staging 发布", corpus, undefined, 99);
+      const one = rankRecall("npm staging 发布", corpus, undefined, 1);
+      ok("k=1 只回 1 条", one.length === 1, `${one.length} 条`);
+      ok("k=1 是完整排序的首条", one[0]?.id === full[0]?.id, `${one[0]?.id} / ${full[0]?.id}`);
+      return;
+    }
+    case "recall-k3": {
+      const { rankRecall } = await import("./under-test/src/recall.ts");
+      const corpus = await recallKCorpus();
+      const dflt = rankRecall("npm staging 发布", corpus);
+      const three = rankRecall("npm staging 发布", corpus, undefined, 3);
+      ok("默认 k=3 回 3 条", dflt.length === 3, `${dflt.length} 条`);
+      ok("显式 k=3 与默认一致", JSON.stringify(dflt.map((h: any) => h.id)) === JSON.stringify(three.map((h: any) => h.id)), `${dflt.length}/${three.length} 条`);
+      return;
+    }
+    case "recall-k5": {
+      const { rankRecall } = await import("./under-test/src/recall.ts");
+      const corpus = await recallKCorpus();
+      const full = rankRecall("npm staging 发布", corpus, undefined, 99);
+      const five = rankRecall("npm staging 发布", corpus, undefined, 5);
+      ok("k=5 回 5 条", five.length === 5, `${five.length} 条`);
+      ok("k=5 是完整排序前缀", JSON.stringify(five.map((h: any) => h.id)) === JSON.stringify(full.slice(0, 5).map((h: any) => h.id)), `${five.length}/${full.length} 条`);
+      return;
+    }
+    case "recall-k-over": {
+      const { rankRecall } = await import("./under-test/src/recall.ts");
+      const corpus = await recallKCorpus();
+      const full = rankRecall("npm staging 发布", corpus, undefined, 99);
+      const five = rankRecall("npm staging 发布", corpus, undefined, 5);
+      ok("k 大于候选数时返回全部候选", full.length === corpus.length, `${full.length}/${corpus.length} 条`);
+      ok("超量 k 不改变前 5 顺序", JSON.stringify(full.slice(0, 5).map((h: any) => h.id)) === JSON.stringify(five.map((h: any) => h.id)), `${full.length}/${five.length} 条`);
+      return;
+    }
     case "miss-log": {
       const L = await load(home, AUTO_OFF);
       const ctx = mkCtx("/work/acme");
@@ -1040,6 +1103,151 @@ async function body(id: string, home: string) {
       setConfig({ briefMaxChars: 2400 });
       const back = await briefNow();
       ok("setConfig 还原后与注入前逐字一致", back === base, `${base.length} / ${back.length} 字符`);
+      return;
+    }
+    case "extract-parse-empty": {
+      const { parseExtractionOutput } = await import("./under-test/src/extract.ts");
+      const a = parseExtractionOutput("");
+      ok("空字符串 → code=empty-response", !a.ok && a.code === "empty-response", JSON.stringify(a));
+      ok("empty-response 的 detail 为空（模型 id 与 reason 由壳拼接）", !a.ok && a.detail === "", !a.ok ? JSON.stringify(a.detail) : "");
+      const b = parseExtractionOutput("  \n\t ");
+      ok("纯空白 → 同样 empty-response", !b.ok && b.code === "empty-response", JSON.stringify(b));
+      return;
+    }
+    case "extract-parse-fence": {
+      const { parseExtractionOutput } = await import("./under-test/src/extract.ts");
+      const a = parseExtractionOutput('说明\n```json\n[{"kind":"preference","subject":"甲","text":"正文甲","confidence":0.9}]\n```\n结束');
+      ok("```json 围栏被剥掉后解析成功", a.ok && Array.isArray(a.value) && (a.value as any[])[0]?.kind === "preference", JSON.stringify(a));
+      const b = parseExtractionOutput('```\n[{"kind":"decision"}]\n```');
+      ok("无语言标记的围栏同样剥掉", b.ok && Array.isArray(b.value) && (b.value as any[])[0]?.kind === "decision", JSON.stringify(b));
+      return;
+    }
+    case "extract-parse-array": {
+      const { parseExtractionOutput } = await import("./under-test/src/extract.ts");
+      const a = parseExtractionOutput("[]");
+      ok("[] → ok:true 且 value 是空数组", a.ok && Array.isArray(a.value) && (a.value as any[]).length === 0, JSON.stringify(a));
+      const b = parseExtractionOutput('```json\n[{"kind":"preference","subject":"甲","text":"正文甲","confidence":0.9}]\n```');
+      ok("围栏里的数组 → ok:true 且字段原样保留", b.ok && (b.value as any[]).length === 1 && (b.value as any[])[0].subject === "甲", JSON.stringify(b));
+      return;
+    }
+    case "extract-parse-no-json": {
+      const { parseExtractionOutput } = await import("./under-test/src/extract.ts");
+      const a = parseExtractionOutput("回包里只有一句话，没有数组");
+      ok("无括号 → code=no-json", !a.ok && a.code === "no-json", JSON.stringify(a));
+      ok("no-json 的 detail = 固定前缀 + 回包片段", !a.ok && a.detail === "回包里找不到 JSON 数组：回包里只有一句话，没有数组", !a.ok ? a.detail : "");
+      const b = parseExtractionOutput("] 先右后左 [");
+      ok("右括号在左括号之前 → no-json", !b.ok && b.code === "no-json", JSON.stringify(b));
+      return;
+    }
+    case "extract-parse-bad-json": {
+      const { parseExtractionOutput } = await import("./under-test/src/extract.ts");
+      const a = parseExtractionOutput('[{"kind":"preference",}]');
+      ok("尾逗号坏 JSON → code=parse-failed", !a.ok && a.code === "parse-failed", JSON.stringify(a));
+      ok("parse-failed 的 detail = 「JSON 解析失败：」+ 片段（reason 由壳补）", !a.ok && a.detail === 'JSON 解析失败：[{"kind":"preference",}]', !a.ok ? a.detail : "");
+      return;
+    }
+    case "extract-normalize-nonarray": {
+      const { normalizeExtractionItems } = await import("./under-test/src/extract.ts");
+      const r = normalizeExtractionItems({ kind: "preference", subject: "甲", text: "正文甲" });
+      ok("对象（非数组）→ candidates / skipped 都为空", r.candidates.length === 0 && r.skipped.length === 0, JSON.stringify(r));
+      const n = normalizeExtractionItems(null);
+      ok("null → 空转", n.candidates.length === 0 && n.skipped.length === 0, JSON.stringify(n));
+      const t = normalizeExtractionItems([1, 2]);
+      ok("数组里的非对象项 → skipped(kind)，不立候选", t.candidates.length === 0 && t.skipped.length === 2 && t.skipped[0].reason === "kind", JSON.stringify(t));
+      return;
+    }
+    case "extract-normalize-cap": {
+      const { normalizeExtractionItems } = await import("./under-test/src/extract.ts");
+      const r = normalizeExtractionItems(
+        ["甲", "乙", "丙", "丁", "戊"].map((s, i) => ({ kind: "preference", subject: "偏好" + s, text: "正文" + s, confidence: 0.7 + i / 100 })),
+      );
+      ok("最多只取前 3 项", r.candidates.length === 3, r.candidates.length + " 条");
+      ok("留下的是前三条（按顺序截断）", r.candidates.map((c) => c.subject).join(",") === "偏好甲,偏好乙,偏好丙", r.candidates.map((c) => c.subject).join(","));
+      ok("candidates 每项带 kind/subject/body/confidence", r.candidates.every((c) => !!c.kind && !!c.subject && !!c.body && typeof c.confidence === "number"), JSON.stringify(r.candidates[0]));
+      return;
+    }
+    case "extract-normalize-invalid": {
+      const { normalizeExtractionItems } = await import("./under-test/src/extract.ts");
+      const r = normalizeExtractionItems([
+        { kind: "nonsense", subject: "甲", text: "正文甲" },
+        { kind: "decision", subject: "   ", text: "正文乙" },
+        { kind: "decision", subject: "丙", text: "  " },
+      ]);
+      ok("非法 kind → skipped(kind)", r.candidates.length === 0 && r.skipped[0]?.reason === "kind", JSON.stringify(r));
+      ok("空 subject（trim 后）→ skipped(subject)", r.skipped[1]?.reason === "subject", JSON.stringify(r.skipped));
+      ok("空 body（trim 后）→ skipped(body)", r.skipped[2]?.reason === "body", JSON.stringify(r.skipped));
+      return;
+    }
+    case "extract-normalize-selfref": {
+      const { normalizeExtractionItems } = await import("./under-test/src/extract.ts");
+      const r = normalizeExtractionItems([
+        { kind: "decision", subject: "记忆库索引改造方案", text: "把派生索引换成 v4" },
+        { kind: "decision", subject: "发布节奏决策", text: "每月一版" },
+      ]);
+      ok("自指 subject → skipped(self-ref)，不立候选", r.candidates.length === 1 && r.skipped.length === 1 && r.skipped[0].reason === "self-ref", JSON.stringify(r));
+      ok("非自指候选照常立条目", r.candidates[0]?.subject === "发布节奏决策", JSON.stringify(r.candidates));
+      const u = normalizeExtractionItems([{ kind: "preference", subject: "用户希望简报少一点细节", text: "只要结论" }]);
+      ok("「用户」开头的偏好不被自指过滤（与 isPluginInternal 一致）", u.candidates.length === 1 && u.skipped.length === 0, JSON.stringify(u));
+      return;
+    }
+    case "extract-normalize-confidence": {
+      const { normalizeExtractionItems } = await import("./under-test/src/extract.ts");
+      const r = normalizeExtractionItems([
+        { kind: "preference", subject: "甲", text: "正文甲", confidence: 1.7 },
+        { kind: "preference", subject: "乙", text: "正文乙", confidence: -0.3 },
+        { kind: "preference", subject: "丙", text: "正文丙" },
+      ]);
+      ok("超过 1 夹到 1", r.candidates[0]?.confidence === 1, String(r.candidates[0]?.confidence));
+      ok("小于 0 夹到 0", r.candidates[1]?.confidence === 0, String(r.candidates[1]?.confidence));
+      ok("缺省 confidence = 0.6", r.candidates[2]?.confidence === 0.6, String(r.candidates[2]?.confidence));
+      const d = normalizeExtractionItems([
+        { kind: "decision", subject: "同一件事", text: "同一结论" },
+        { kind: "decision", subject: "同一件事", text: "同一结论" },
+        { kind: "decision", subject: "同一件事", text: "补一句" },
+      ]);
+      ok("同批完全重复只留首条，重复项进 skipped(duplicate)", d.candidates.length === 2 && d.skipped.some((x) => x.reason === "duplicate"), JSON.stringify(d));
+      return;
+    }
+    case "extract-decide-split": {
+      const { decideExtractionBatch } = await import("./under-test/src/extract.ts");
+      const candidates = [
+        { kind: "preference", subject: "答复结构", body: "先给结论再给依据", confidence: 0.9 },
+        { kind: "preference", subject: "会议纪要格式", body: "只留结论与待办", confidence: 0.6 },
+      ];
+      const seen: string[] = [];
+      const out = decideExtractionBatch(candidates, (kind, subject, body) => {
+        seen.push(`${kind}/${subject}/${body}`);
+        return subject === "答复结构";
+      });
+      ok("第一条命中既有条目 → verdict=conflict", out[0]?.verdict === "conflict", JSON.stringify(out[0]));
+      ok("第二条无冲突 → verdict=create", out[1]?.verdict === "create", JSON.stringify(out[1]));
+      ok("每条候选原样保留引用", out[0]?.candidate === candidates[0] && out[1]?.candidate === candidates[1], JSON.stringify(out.map((x) => x.candidate.subject)));
+      ok("查找函数收到 kind/subject/body 三元组", seen.length === 2 && seen[0].includes("答复结构") && seen[1].includes("会议纪要格式"), seen.join(" | "));
+      return;
+    }
+    case "extract-decide-isolated": {
+      const { decideExtractionBatch } = await import("./under-test/src/extract.ts");
+      const candidates = [
+        { kind: "decision", subject: "甲", body: "正文甲", confidence: 0.7 },
+        { kind: "decision", subject: "乙", body: "正文乙", confidence: 0.7 },
+        { kind: "decision", subject: "丙", body: "正文丙", confidence: 0.7 },
+      ];
+      const conflictKeys = new Set(["decision/乙"]);
+      const out = decideExtractionBatch(candidates, (kind, subject) => conflictKeys.has(`${kind}/${subject}`));
+      ok("中间一条冲突 → conflict", out[1]?.verdict === "conflict", JSON.stringify(out[1]));
+      ok("前后两条仍为 create", out[0]?.verdict === "create" && out[2]?.verdict === "create", JSON.stringify(out.map((x) => x.verdict)));
+      ok("判决条数与候选数一致", out.length === candidates.length, `${out.length}/${candidates.length}`);
+      return;
+    }
+    case "extract-decide-empty": {
+      const { decideExtractionBatch } = await import("./under-test/src/extract.ts");
+      let calls = 0;
+      const out = decideExtractionBatch([], () => {
+        calls++;
+        return true;
+      });
+      ok("空 candidates 返回空数组", Array.isArray(out) && out.length === 0, JSON.stringify(out));
+      ok("空批次不调用查找函数", calls === 0, `calls=${calls}`);
       return;
     }
     default:

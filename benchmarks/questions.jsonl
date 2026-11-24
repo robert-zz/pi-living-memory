@@ -1,0 +1,59 @@
+{"id": "q001", "q": "npm CLI 打印的授权链接有效期多久", "cat": "exact", "scope": null, "gold": ["20261118-031958-96ec"]}
+{"id": "q002", "q": "Upwork 的 Bid per click 和 limit 各指什么、上限怎么算", "cat": "exact", "scope": null, "gold": ["20261121-091049-ea56"]}
+{"id": "q003", "q": "npm publish 一直 403 是什么原因", "cat": "exact", "scope": null, "gold": ["20261117-120954-9bf6"]}
+{"id": "q004", "q": "pi 会话归档的冷阈值有哪些候选", "cat": "exact", "scope": null, "gold": ["20261123-084637-7501", "20261123-074040-45b2"]}
+{"id": "q005", "q": "Amazon Associates 什么时间接入", "cat": "exact", "scope": null, "gold": ["20261123-092606-2740", "20261123-035635-016b"]}
+{"id": "q006", "q": "在长沙华科那段工作经历的起止时间和职位", "cat": "exact", "scope": "project:fuye", "gold": ["20261120-092928-54f9"]}
+{"id": "q007", "q": "我的 GitHub 账号名和本机 SSH 密钥路径", "cat": "exact", "scope": null, "gold": ["20261117-140651-e2a6"]}
+{"id": "q008", "q": "我的 npm 用户名是什么", "cat": "exact", "scope": null, "gold": ["20261117-115139-a306"]}
+{"id": "q009", "q": "养生站 Journal 现在一共几篇", "cat": "exact", "scope": null, "gold": ["20261123-092606-3b38", "20261123-055800-f6b3"]}
+{"id": "q010", "q": "下一次大雪节气内容重建排在哪天", "cat": "exact", "scope": null, "gold": ["20261122-082036-b60a"]}
+{"id": "q011", "q": "Gradle 不支持 OpenJDK 27 这件事怎么处理的", "cat": "exact", "scope": null, "gold": ["20261121-131035-edd4"]}
+{"id": "q012", "q": "我的知识库 vault 目录是怎么分层的", "cat": "exact", "scope": null, "gold": ["20261118-033520-56da"]}
+{"id": "q013", "q": "vault 里一个文件一次提交还是攒一批", "cat": "state", "scope": null, "gold": ["20261122-121642-865d"]}
+{"id": "q014", "q": "我同时多开好几个 pi 窗口，归档会话要先把进程 kill 掉吗", "cat": "state", "scope": null, "gold": ["20261123-054353-4dbe", "20261123-054735-25c7"]}
+{"id": "q015", "q": "pi session 归档后要在原路径重建同名会话吗", "cat": "state", "scope": null, "gold": ["20261123-072629-2644"]}
+{"id": "q016", "q": "pi session 的 sidecar 文件要怎么处理", "cat": "state", "scope": null, "gold": ["20261123-073201-aac4"]}
+{"id": "q017", "q": "删除 session 文件之前必须先做什么检查", "cat": "state", "scope": null, "gold": ["20261122-140046-40a4"]}
+{"id": "q018", "q": "编码协作规则现在只管编码行为吗，写文档要不要委派", "cat": "state", "scope": null, "gold": ["20261117-071315-efc4", "20261117-071319-18fb"]}
+{"id": "q019", "q": "养生站的内容更新是跟着日历走吗", "cat": "state", "scope": null, "gold": ["20261123-035635-fd8f"]}
+{"id": "q020", "q": "养生站现在每篇都保留 AI 辅助披露吗", "cat": "state", "scope": null, "gold": ["20261123-053631-25b8"]}
+{"id": "q021", "q": "我机器上装了哪几个 AI harness", "cat": "state", "scope": null, "gold": ["20261122-134914-bf76"]}
+{"id": "q022", "q": "小说《世界序列》现在写到第几章、多少字", "cat": "state", "scope": null, "gold": ["20261122-085452-3023"]}
+{"id": "q023", "q": "keqiz.com 官网项目现在放在哪个域名下", "cat": "state", "scope": "project:keqiz.com", "gold": ["20261119-134908-87e3"]}
+{"id": "q024", "q": "我的英语水平对外材料应该怎么写", "cat": "state", "scope": "workspace:vault", "gold": ["20261115-132411-6f4a"]}
+{"id": "q025", "q": "journal 以前是几篇，现在改成几篇", "cat": "history", "scope": null, "gold": ["20261123-055800-f6b3"]}
+{"id": "q026", "q": "我 npm 账户一开始为什么想取消 2FA", "cat": "history", "scope": null, "gold": ["20261117-114604-67f5"]}
+{"id": "q027", "q": "Upwork 岗位发现方式后来改成了什么", "cat": "history", "scope": "workspace:vault", "gold": ["20261115-035809-ca08"]}
+{"id": "q028", "q": "Upwork 作品集一开始只放一个项目吗", "cat": "history", "scope": "project:fuye", "gold": ["20261116-124442-9521", "20261116-124458-ce9d"]}
+{"id": "q029", "q": "小雪节气那批内容重建的结果怎样", "cat": "history", "scope": null, "gold": ["20261122-082036-b5e7"]}
+{"id": "q030", "q": "yangsheng M4 week1 首轮实测跑出什么结论", "cat": "history", "scope": null, "gold": ["20261120-042539-922d"]}
+{"id": "q031", "q": "keqiz 官网 Logo 最后定了哪个方案", "cat": "history", "scope": "project:keqiz.com", "gold": ["20261120-040811-ef5f"]}
+{"id": "q032", "q": "TCN 售货机项目提案的报价是多少", "cat": "history", "scope": null, "gold": ["20261115-075259-d328"]}
+{"id": "q033", "q": "投标包里的公司主体名最后定了哪个", "cat": "history", "scope": null, "gold": ["20261115-092814-2fc5"]}
+{"id": "q034", "q": "现在用手机 Chrome 上的 passkey 做 npm 验证这事怎么来的", "cat": "history", "scope": null, "gold": ["20261117-132658-4583"]}
+{"id": "q035", "q": "yangsheng 的配图尺寸规则", "cat": "scope", "scope": "project:yangsheng", "gold": ["20261115-073807-43df"]}
+{"id": "q036", "q": "vanlife 用的是哪套 OSS 存储方案", "cat": "scope", "scope": "project:vanlife", "gold": ["20261115-073750-cceb"]}
+{"id": "q037", "q": "itsfun 仓的 push 规则", "cat": "scope", "scope": "project:itsfun", "gold": ["20261115-073750-840c"]}
+{"id": "q038", "q": "itsfun 的 AI 问答合规定位是什么", "cat": "scope", "scope": "project:itsfun", "gold": ["20261115-073750-7c6d"]}
+{"id": "q039", "q": "vanlife 服务明细里技师锁定怎么定", "cat": "scope", "scope": "project:vanlife", "gold": ["20261115-073807-d7e9"]}
+{"id": "q040", "q": "KqFormDialog 的 show() success 约定", "cat": "scope", "scope": "project:vanlife", "gold": ["20261115-073750-3af4"]}
+{"id": "q041", "q": "fuye 作品集对外的披露范围", "cat": "scope", "scope": "project:fuye", "gold": ["20261116-124458-0889"]}
+{"id": "q042", "q": "yangsheng 食谱页面的栏目是几栏固定", "cat": "scope", "scope": "project:yangsheng", "gold": ["20261115-073807-2609"]}
+{"id": "q043", "q": "vault 里小说的命名约定", "cat": "scope", "scope": "workspace:vault", "gold": ["20261115-073807-7410"]}
+{"id": "q044", "q": "vault 里可以直接 push 吗", "cat": "neg", "scope": null, "gold": ["20261123-092606-4ccb", "20261123-053704-303b"]}
+{"id": "q045", "q": "vault 里能不能 git add -A", "cat": "neg", "scope": "workspace:vault", "gold": ["20261115-073807-4e5f"]}
+{"id": "q046", "q": "relation 类推断能自动转正为事实吗", "cat": "neg", "scope": null, "gold": ["20261117-040110-7ea4"]}
+{"id": "q047", "q": "引用 Merck Manual 时能写精确数字吗", "cat": "neg", "scope": null, "gold": ["20261123-060934-b4c3"]}
+{"id": "q048", "q": "养生站一篇文章里「不是…而是…」最多几处", "cat": "neg", "scope": null, "gold": ["20261123-055910-8f10", "20261123-060317-448c"]}
+{"id": "q049", "q": "艾灸科普可以教居家操作吗", "cat": "neg", "scope": null, "gold": ["20261119-034317-15e7"]}
+{"id": "q050", "q": "写内容时要不要用 worker 子代理", "cat": "neg", "scope": null, "gold": ["20261118-121118-9a53"]}
+{"id": "q051", "q": "npm 的 bypass-2FA token 能直接把包发到正式版吗", "cat": "neg", "scope": null, "gold": ["20261117-121826-8c85"]}
+{"id": "q052", "q": "多篇文章可以共用一张题图吗", "cat": "neg", "scope": null, "gold": ["20261118-131328-9871"]}
+{"id": "q053", "q": "子代理可以擅自换用别的模型吗", "cat": "neg", "scope": null, "gold": ["20261115-073750-ae29"]}
+{"id": "q054", "q": "我的第二台笔记本是什么型号", "cat": "absent", "scope": null, "gold": []}
+{"id": "q055", "q": "我养过猫吗", "cat": "absent", "scope": null, "gold": []}
+{"id": "q056", "q": "yangsheng 的 Google AdSense 审核过了吗", "cat": "absent", "scope": null, "gold": []}
+{"id": "q057", "q": "我的血压平时多少", "cat": "absent", "scope": null, "gold": []}
+{"id": "q058", "q": "itsfun 的 App Store 上架审核状态", "cat": "absent", "scope": null, "gold": []}
+{"id": "q059", "q": "pi 这个 npm 包打出来的 tarball 是多少字节", "cat": "absent", "scope": null, "gold": []}

@@ -1,6 +1,6 @@
 /**
  * 按问题召回：索引行上的 BM25，命中后才由调用方读正文。
- * 纯计算：给定「候选索引行 + 查询」→ 排序后的 top 3。候选从哪来（entryStore.list + scope 过滤）归 ops，
+ * 纯计算：给定「候选索引行 + 查询」→ 排序后的前 k 条（默认 3）。候选从哪来（entryStore.list + scope 过滤）归 ops，
  * 本模块不 import store、不做 IO。
  */
 import { refreshConfig } from "./config";
@@ -20,7 +20,7 @@ const RECALL_SINGLE_IDF = 3.5;
 
 /**
  * 召回第一阶段：只在索引行（meta.subject/title/toks）上算 BM25，绝不读 entries 正文。
- * 第二阶段由命中 id 的调用方按需 parseEntry；本函数只回 top 3 的 id/subject/title/score。
+ * 第二阶段由命中 id 的调用方按需 parseEntry；本函数只回前 k 条（默认 3）的 id/subject/title/score。
  *
  * 中文与 ASCII 两套规则为什么不对称：中文 bigram 切不出「专名」，域名/自己/岗位 这类通用词
  * 在 N=85 时 idf 也能到 3.5+，单命中放行几乎全是假阳性（「域名在哪里注册」召回 FoxyProxy 规则）；
@@ -31,6 +31,7 @@ export function rankRecall(
   query: string,
   corpus: EntryIndex[],
   excludeIds?: Set<string>,
+  k = 3,
 ): Array<{ id: string; subject: string; title: string; score: number }> {
   const q = String(query ?? "").trim().slice(0, 200);
   const qToks = tokensOf(q);
@@ -92,5 +93,7 @@ export function rankRecall(
     // 最少命中：2 个不同词元；或 1 个 ASCII 专名且 idf ≥ 3.5（中文单命中一律不放行）
     .filter((x) => x.score > 0 && (x.hits >= 2 || (x.hits === 1 && x.singleAscii && x.maxIdf >= RECALL_SINGLE_IDF)));
   scored.sort((a, b2) => b2.score - a.score || Number(b2.subHit) - Number(a.subHit) || (a.id < b2.id ? 1 : -1));
-  return scored.slice(0, 3);
+  // 返回条数：默认 3（向后兼容）；<=0 返回空；非有限值回落到默认 3；大于候选数时自然截断
+  const topK = Number.isFinite(k) ? Math.max(0, Math.floor(k)) : 3;
+  return scored.slice(0, topK);
 }
