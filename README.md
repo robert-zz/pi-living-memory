@@ -28,6 +28,8 @@ per-turn prompt cost stays flat as the library grows.
 - **Dependencies**: `typebox` and `@earendil-works/*` are host-provided. They are declared as
   `peerDependencies` and never bundled (a physical copy would bypass Pi's module mapping).
 
+![pi-living-memory demo](https://raw.githubusercontent.com/robert-zz/pi-living-memory/main/docs/img/08-demo.gif)
+
 ## Before installing: default behavior
 
 1. **Writes to disk**: creates directories under `~/.pi/agent/memory/`, writes entries and files such as `index.json`. Removing the extension does not remove these files.

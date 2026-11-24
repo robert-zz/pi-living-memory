@@ -37,6 +37,7 @@
     "tests",
     "!tests/under-test",
     "docs",
+    "!docs/img/*.gif",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"

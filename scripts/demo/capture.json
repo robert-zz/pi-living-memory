@@ -1,0 +1,27 @@
+{
+  "note": "由 scripts/demo/capture.ts 生成（真实扩展输出，勿手改；重跑：bun scripts/demo/capture.ts）",
+  "cwd": "/demo/acme",
+  "frozen_now": "2026-11-24T09:00:00.000Z",
+  "remember": {
+    "prompt": "记住：下周三去成都出差，周四回。",
+    "params": {
+      "kind": "commitment",
+      "subject": "用户",
+      "text": "下周三去成都出差，周四回。",
+      "basis": "explicit",
+      "source": "2026-11-24 用户原话「下周三去成都出差，周四回」"
+    },
+    "lines": [
+      "已记入长期记忆 20261124-090000-5737（status=explicit，scope=global）",
+      "存储: /tmp/lm-demo-home/.pi/agent/memory/entries/20261124-090000-5737.md"
+    ]
+  },
+  "brief": {
+    "prompt": "下周出差要带什么？",
+    "heading": "## Living Memory（个人长期记忆层 · Today 契约）",
+    "lines": [
+      "用户：下周三去成都出差，周四回。",
+      "近期：11-24 commitment/用户"
+    ]
+  }
+}
