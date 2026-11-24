@@ -27,7 +27,7 @@ flowchart LR
 | 高置信与证据驱动自动转正；relation / needs-confirm 永久排除 | ✅ |
 | 模块化拆分，依赖单向无环，模块顶层零 IO | ✅ |
 | npm 发布、GitHub Actions、包内 docs | ✅ |
-| 回归测试 61 用例 / 275 断言 | ✅ |
+| 回归测试 61 用例 / 276 断言 | ✅ |
 
 ## v0.2.x — 召回质量基线与工程补齐
 

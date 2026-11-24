@@ -581,11 +581,12 @@ async function body(id: string, home: string) {
       // ① 0.9 → 直接按事实（confirmed）
       const r1 = out(await L.call("remember", { kind: "preference", subject: "报告风格", text: "报告一律先给结论。", basis: "inference", confidence: 0.9, source: "fixture 高置信" }, ctx));
       ok("0.9 自动按事实", /status=confirmed/.test(r1), r1.split("\n")[0]);
-      const e1 = L.findEntry ? null : null;
-      const file1 = fs.readdirSync(path.join(mem(home), "entries")).find((f: string) => f.startsWith("2026") );
-      const txt1 = fs.readFileSync(path.join(mem(home), "entries", file1), "utf8");
-      ok("落盘 status=confirmed", /status: confirmed/.test(txt1), file1);
-      ok("confirmed_at 已填", /confirmed_at: 2026/.test(txt1), "");
+      const id1 = r1.match(/已记入长期记忆 ([0-9]{8}-[0-9]{6}-[a-z0-9]{4})/)?.[1] ?? "";
+      const p1 = path.join(mem(home), "entries", `${id1}.md`);
+      ok(`${id1 || "<未解析到 id>"} 落盘存在`, id1 !== "" && fs.existsSync(p1), id1 || r1.split("\n")[0]);
+      const txt1 = id1 !== "" && fs.existsSync(p1) ? fs.readFileSync(p1, "utf8") : "";
+      ok("落盘 status=confirmed", /status: confirmed/.test(txt1), id1);
+      ok("confirmed_at 已填", /confirmed_at: 2026/.test(txt1), id1);
 
       // ② 0.6 → 仍是推断（弱参考）
       const r2 = out(await L.call("remember", { kind: "preference", subject: "会议习惯", text: "会议纪要当天发。", basis: "inference", confidence: 0.6, source: "fixture 低置信" }, ctx));

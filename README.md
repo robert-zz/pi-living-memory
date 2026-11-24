@@ -24,7 +24,7 @@ per-turn prompt cost stays flat as the library grows.
 - **Before installing, know the defaults**: it writes `~/.pi/agent/memory/`, and by default
   sends the tail of each conversation to *your own* model provider for memory extraction
   (`LIVING_MEMORY_EXTRACT=0` disables). The section "Before installing: default behavior" spells out every side effect.
-- **Tests**: `bun tests/run.ts` - 61 cases / 275 assertions against a temporary HOME, never your real store.
+- **Tests**: `bun tests/run.ts` - 61 cases / 276 assertions against a temporary HOME, never your real store.
 - **Dependencies**: `typebox` and `@earendil-works/*` are host-provided. They are declared as
   `peerDependencies` and never bundled (a physical copy would bypass Pi's module mapping).
 
@@ -242,7 +242,7 @@ score = confidence * 0.40                  # self-rating contributes at most 40%
 ## Tests
 
 ```bash
-bun tests/run.ts            # all (61 cases / 275 assertions, about 4s)
+bun tests/run.ts            # all (61 cases / 276 assertions, about 4s)
 bun tests/run.ts --only brief
 bun tests/run.ts --list
 ```

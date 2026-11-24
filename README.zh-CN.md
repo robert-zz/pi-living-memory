@@ -204,7 +204,7 @@ score = confidence × 0.40        # 自评最多 40%
 ## 测试
 
 ```bash
-bun tests/run.ts            # 全部（61 用例 / 275 断言，约 4s）
+bun tests/run.ts            # 全部（61 用例 / 276 断言，约 4s）
 bun tests/run.ts --only brief
 bun tests/run.ts --list
 ```
