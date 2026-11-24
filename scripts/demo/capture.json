@@ -1,5 +1,5 @@
 {
-  "note": "由 scripts/demo/capture.ts 生成（真实扩展输出，勿手改；重跑：bun scripts/demo/capture.ts）",
+  "note": "由 scripts/demo/capture.ts 生成（真实扩展输出；临时 HOME 显示为 ~；重跑：bun scripts/demo/capture.ts）",
   "cwd": "/demo/acme",
   "frozen_now": "2026-11-24T09:00:00.000Z",
   "remember": {
@@ -13,7 +13,7 @@
     },
     "lines": [
       "已记入长期记忆 20261124-090000-5737（status=explicit，scope=global）",
-      "存储: /tmp/lm-demo-home/.pi/agent/memory/entries/20261124-090000-5737.md"
+      "存储: ~/.pi/agent/memory/entries/20261124-090000-5737.md"
     ]
   },
   "brief": {

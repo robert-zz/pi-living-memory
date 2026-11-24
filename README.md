@@ -1,6 +1,6 @@
 # pi-living-memory
 
-[中文文档](https://github.com/robert-zz/pi-living-memory/blob/main/docs/README.zh.md)
+[中文文档](https://github.com/robert-zz/pi-living-memory/blob/main/README.zh-CN.md)
 
 ## English quick start
 
@@ -271,4 +271,4 @@ An upgrade swaps code only; `~/.pi/agent/memory` is left as is. `/reload` applie
 - [Development and design constraints](https://github.com/robert-zz/pi-living-memory/blob/main/docs/development.md): module layout, jiti pitfalls, six constraints to read before changing code
 - [Publishing to npm](https://github.com/robert-zz/pi-living-memory/blob/main/docs/publishing.md): maintainer-facing, the full 2FA and staged publishing flow
 - [Roadmap](https://github.com/robert-zz/pi-living-memory/blob/main/docs/roadmap.md)
-- [Chinese README](https://github.com/robert-zz/pi-living-memory/blob/main/docs/README.zh.md)
+- [Chinese README](https://github.com/robert-zz/pi-living-memory/blob/main/README.zh-CN.md)

@@ -9,7 +9,9 @@
  *      只改 process.env.HOME 不会让 paths.ts 的 STORE 换目录）。
  *   2. setClock 冻结到固定时刻 —— 条目 id 的日期戳、简报「近期」行的月份都固定。
  *   3. Math.random 换成定种 PRNG —— 条目 id 的后 4 位十六进制固定。
- * 因此 capture.json 可重复生成、逐字可 diff；文本由扩展代码产生，脚本不做任何改写或补白。
+ *   4. 显示归一化：临时 HOME 的绝对路径随机器 TMPDIR 变化，写 capture.json 前折成 `~`；
+ *      条目 id、status、scope 等其余文本逐字保留。
+ * 因此 capture.json 可重复生成、逐字可 diff；除 `~` 前缀外，文本由扩展代码产生，脚本不做改写或补白。
  * 临时 HOME 每次重跑前清空，真库零写入。
  */
 import * as fs from "node:fs";
@@ -23,6 +25,8 @@ const HERE = path.dirname(new URL(import.meta.url).pathname);
 const OUT_FILE = path.join(HERE, "capture.json");
 /** 固定的临时 HOME：路径会出现在 remember 返回的“存储:”行里，必须可重复 */
 const DEMO_HOME = path.join(nodeOs.tmpdir(), "lm-demo-home");
+/** 临时 HOME 的绝对路径随机器变化（TMPDIR 可配置），显示层统一折成 `~`：只替换该前缀，其余逐字保留 */
+const foldDemoHome = (text: string): string => text.split(DEMO_HOME).join("~");
 const DEMO_CWD = "/demo/acme";
 const FROZEN_NOW = Date.UTC(2026, 10, 24, 9, 0, 0);
 const FROZEN_TODAY = "2026-11-24";
@@ -141,11 +145,11 @@ async function main(): Promise<void> {
     if (!factLine) throw new Error("简报里没有本次写入的分层行——demo 假设被打破");
 
     const payload = {
-      note: "由 scripts/demo/capture.ts 生成（真实扩展输出，勿手改；重跑：bun scripts/demo/capture.ts）",
+      note: "由 scripts/demo/capture.ts 生成（真实扩展输出；临时 HOME 显示为 ~；重跑：bun scripts/demo/capture.ts）",
       cwd: DEMO_CWD,
       frozen_now: `2026-11-24T${new Date(FROZEN_NOW).toISOString().slice(11)}`,
-      remember: { prompt: FIRST_PROMPT, params: REMEMBER_PARAMS, lines: wrote.split("\n") },
-      brief: { prompt: NEXT_PROMPT, heading, lines: related },
+      remember: { prompt: FIRST_PROMPT, params: REMEMBER_PARAMS, lines: wrote.split("\n").map(foldDemoHome) },
+      brief: { prompt: NEXT_PROMPT, heading: foldDemoHome(heading), lines: related.map(foldDemoHome) },
     };
     fs.writeFileSync(OUT_FILE, `${JSON.stringify(payload, null, 2)}\n`);
 
