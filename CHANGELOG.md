@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.3] - 2026-11-25
+
+工程质量：类型门禁、双语文档与 demo（工具返回值统一补宿主必填 `details`，模型可见文本不变）。
+
+- 新增类型门禁：`tsconfig.json`（strict/noEmit，覆盖 `extensions/**` 与 `tests/**`）+ `bun run typecheck` + CI `test` job 增 `Typecheck (strict, noEmit)` 步骤；`extensions/src` 23 处 strict 错误清零（`brief.ts` 13 / `evidence.ts` 9 / `search.ts` 1），门禁另带出 `extensions/living-memory.ts` 3 处（工具返回值缺宿主必填 `details`）与 `tests/harness.ts` 1 处，全仓 27 处清零；未用 `ts-ignore` / `as any` 压制。
+- `prepublishOnly` 串联 `bun tests/run.ts && bun run typecheck`：发布前测试与类型检查一起跑，任一失败即阻断。
+- 文档双语：`README.md` 改为全英文；中文全文迁入根 `README.zh-CN.md`（npm always-include `README.*`，随包发布），先前的 `docs/README.zh.md` 已删除。
+- 新增 demo GIF `docs/img/08-demo.gif`（32.6 KB，GIF 内不含本机临时 HOME 路径）：随仓库分发，`README.md` 以 raw URL 引用，tarball 内不含（`files` 排除 `docs/img/*.gif`）；附可重跑生成脚本 `scripts/demo/`。
+- fix(test)：`auto-fact` 用例的顺序依赖（改为按返回 id 精确读文件）；断言 276/276（61 用例）。
+- 门禁口径：干净 clone 直接 `bun run typecheck` 会因未生成 `tests/under-test`（测试运行时生成、gitignore）报 TS2307，故 CI 顺序为 `Run tests` → `Typecheck`；本地等价命令 `bun tests/run.ts && bun run typecheck`。
+
 ## [0.2.2] - 2026-11-24
 
 召回基准与抽取内部拆分（**对外行为零变化**：运行日志与抽取配额不变）。
