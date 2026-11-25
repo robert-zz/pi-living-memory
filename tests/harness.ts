@@ -4,6 +4,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export type Check = { name: string; ok: boolean; detail?: string };
 
@@ -56,7 +57,7 @@ export async function load(home: string, env: Record<string, string | null> = {}
   }
   const ext = (await import("./under-test/living-memory.ts")).default;
   const it = makeApi();
-  ext(it.api);
+  ext(it.api as unknown as ExtensionAPI); // 测试替身：只实现被测扩展实际用到的注册面
   const call = (name: string, params: any, ctx: any = mkCtx()) => {
     const t = it.tools.find((x: any) => x.name === name);
     if (!t) throw new Error(`未注册工具：${name}`);

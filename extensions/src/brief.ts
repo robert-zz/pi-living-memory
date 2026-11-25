@@ -7,7 +7,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { cfg, clock, refreshConfig } from "./config";
-import { ACTIVE, type Entry, type EntryIndex } from "./manifest";
+import { ACTIVE, type EntryIndex } from "./manifest";
 import { isNegation } from "./text";
 import { PROFILE_BRIEF_FLAG, PROFILE_FILE } from "./paths";
 import { entryStore } from "./stores/entry-store";
@@ -96,13 +96,13 @@ export function buildBrief(cwd?: string, query?: string): string {
     return String(b.meta.obtained_at).localeCompare(String(a.meta.obtained_at));
   };
   const visible = active.filter((e: EntryIndex) => inScope(e, cwd));
-  const d = visible.filter((e: Entry) => isDue(e.meta)).sort(urgent);
-  const p = visible.filter((e: Entry) => e.meta.status === "inference" && !d.includes(e)).sort(urgent);
-  const proj = visible.filter((e: Entry) => !d.includes(e) && !p.includes(e) && scoped(e)).sort(urgent);
+  const d = visible.filter((e: EntryIndex) => isDue(e.meta)).sort(urgent);
+  const p = visible.filter((e: EntryIndex) => e.meta.status === "inference" && !d.includes(e)).sort(urgent);
+  const proj = visible.filter((e: EntryIndex) => !d.includes(e) && !p.includes(e) && scoped(e)).sort(urgent);
   // 负面偏好（不要/禁止/避免…）在全局档里优先，避免「别做 X」被普通偏好挤掉
   const glob = visible
-    .filter((e: Entry) => !d.includes(e) && !p.includes(e) && !scoped(e))
-    .sort((a: Entry, b: Entry) => (isNegation(b) ? 1 : 0) - (isNegation(a) ? 1 : 0) || urgent(a, b));
+    .filter((e: EntryIndex) => !d.includes(e) && !p.includes(e) && !scoped(e))
+    .sort((a: EntryIndex, b: EntryIndex) => (isNegation(b) ? 1 : 0) - (isNegation(a) ? 1 : 0) || urgent(a, b));
   const tiers: Array<{ tag: string; cap: number; items: EntryIndex[] }> = [
     { tag: "[到期] ", cap: 5, items: d },
     { tag: "", cap: 8, items: proj },

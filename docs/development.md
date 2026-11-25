@@ -38,12 +38,25 @@ extensions/living-memory.ts      壳：pi 注册、工具 schema、事件接线�
 ```bash
 cd /path/to/pi-living-memory
 # 改 extensions/ 下的代码
-bun tests/run.ts          # 44 用例 / 230 断言，跑在临时 HOME，不碰真库
+bun tests/run.ts          # 61 用例 / 276 断言，跑在临时 HOME，不碰真库
+bun run typecheck         # strict 类型门禁（需先跑 tests 生成 under-test）
 /reload                   # 包路径就是本目录，pi 重新读盘即生效
 git commit -am "..." && git tag v0.x.y
 ```
 
 `/reload` 只重载模块；**删/加扩展文件、改 `settings.json` 的 packages 后必须重启 pi**，否则旧实例的注册不会消失（表现为 `/memory:1`、`/memory:2`）。
+
+## 类型门禁
+
+```bash
+bun tests/run.ts          # 61 用例 / 276 断言；同时把源码复制成 tests/under-test/
+bun run typecheck         # tsc --noEmit（strict）；无输出即通过
+```
+
+- 配置在 `tsconfig.json`：`strict` + `noEmit`，`target: ES2022` / `lib: ES2023`（Bun 与 Node 22 的实际语义），`moduleResolution: Bundler` 适配现有无扩展名 ESM import；`types: ["bun"]` 提供 `Bun`/Node 全局（`tests/run.ts` 用 `Bun.spawn`）。只覆盖 `extensions/**` 与 `tests/**`，不扫 `node_modules` 或宿主包内部；`skipLibCheck` 跳过宿主 d.ts 的内部检查。
+- 类型来源走 `devDependencies`（`typescript`、`@types/bun`、`typebox`、`@earendil-works/pi-ai`、`@earendil-works/pi-coding-agent`），干净 clone 先 `npm install`；CI 里现有 `npm install --no-save ...` 会连同 package.json 的 devDependencies 一起装好。
+- **typecheck 依赖 `tests/under-test/`**：`tests/harness.ts` 与 `tests/cases.ts` 静态 import 这份运行时副本（gitignored）。干净 clone 直接 `bun run typecheck` 会报一批 `TS2307`（约 24 条，`tests/cases.ts` 与 `tests/harness.ts` 指向 `./under-test/*`）；先跑一次 `bun tests/run.ts` 生成即可，CI 里 typecheck 排在 Run tests 之后就是为此。
+- 错误必须用真实类型修（显式注解、类型守卫、`??` 兜底），**禁止** `@ts-ignore` / `@ts-expect-error` / `as any` / `!` 压错误；确需在宿主边界放宽时（如测试替身、宿主契约要求的字段），在 PR 里单独说明理由。
 
 ## 两个 jiti 相关的坑
 

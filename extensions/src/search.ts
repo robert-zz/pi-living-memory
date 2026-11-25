@@ -16,7 +16,7 @@ import { bigrams, jaccard, normBody, normSubject } from "./text";
 import { SELF_REF_MARK } from "./triage";
 import { isDue } from "./time";
 import { entryStore } from "./stores/entry-store";
-import { dueState, parseTodoMeta, todoStore } from "./stores/todo-store";
+import { dueState, parseTodoMeta, todoStore, type DueState } from "./stores/todo-store";
 import { summaryStore, type SummarySection } from "./stores/summary-store";
 
 /** 零命中日志（miss.log）保留行数：超过就只留最后 200 行 */

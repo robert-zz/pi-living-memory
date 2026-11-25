@@ -7,7 +7,7 @@
 import * as fs from "node:fs";
 
 import { cfg, clock, logger, refreshConfig } from "./config";
-import type { Entry, Meta } from "./manifest";
+import type { Entry, EntryIndex, Meta } from "./manifest";
 import { PROFILE_STYLE_STAMP, isPaused } from "./paths";
 import { isNegation } from "./text";
 import { entryStore } from "./stores/entry-store";
@@ -23,6 +23,7 @@ export const autoFactable = (kind: string, conf: number, impact?: string) =>
 // 原则：自评置信度最多贡献 0.4 分；跨会话复现 ≤0.35；用户原话重述 0.35；
 // 隐私/决策类（relation/decision/outcome）与含糊表述扣分；转正还必须独立证据 ≥2。
 type Ev = { at: string; kind: string; id?: string; note?: string };
+type PromoteCandidate = { r: EntryIndex; e: Entry };
 const HEDGE_MARK = /(可能|大概|也许|或许|待定|尚不确定|不确定|估计|应该是|似乎|推测|不一定)/;
 function evidenceOf(meta: Meta): Ev[] {
   try {
@@ -124,7 +125,7 @@ export function opPromoteScan(limit = 20): string {
   const rows = entryStore.list()
     .filter((r) => r.meta.status === "inference") // 只有推断是转正候选，confirmed/explicit 无需评分
     .map((r) => ({ r, e: entryStore.get(r.id) }))
-    .filter((x): x is { r: (typeof rows)[number]["r"]; e: Entry } => !!x.e)
+    .filter((x): x is PromoteCandidate => !!x.e)
     .map(({ r, e }) => ({
       id: r.id,
       subject: r.meta.subject ?? "",

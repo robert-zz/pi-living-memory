@@ -45,7 +45,15 @@
   "scripts": {
     "test": "bun tests/run.ts",
     "test:list": "bun tests/run.ts --list",
-    "prepublishOnly": "bun tests/run.ts"
+    "prepublishOnly": "bun tests/run.ts && bun run typecheck",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^1.6.0",
+    "@earendil-works/pi-coding-agent": "^1.6.0",
+    "@types/bun": "^1.4.5",
+    "typebox": "^1.3.27",
+    "typescript": "^5.9.3"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

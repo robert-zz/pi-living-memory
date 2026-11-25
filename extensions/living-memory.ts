@@ -18,7 +18,7 @@
  *   L0 config · L1 text/paths · L2 manifest · L3 recall + stores/* · L4 ops · L5 brief · L6 extract · L7 本壳
  * 本壳只做 pi 注册、工具 schema、事件接线与日志落点；业务在 ./src 下按层拆分。
  */
-import { type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { type AgentToolResult, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import * as fs from "node:fs";
@@ -169,6 +169,19 @@ function refreshWidget(ctx: any) {
 }
 
 // ---------- 扩展 ----------
+type TextToolReply = string | { content: Array<{ type: "text"; text: string }> };
+
+/** 工具返回值归一：宿主契约要求 AgentToolResult（details 必填），本扩展只产出文本 content；
+ *  在此统一补 details（不发给模型，供日志/UI）并把历史遗留的裸字符串分支包成 content。execute 主体保持原样。 */
+function toolExecute<A extends unknown[]>(fn: (...args: A) => Promise<TextToolReply>) {
+  return async (...args: A): Promise<AgentToolResult> => {
+    const r = await fn(...args);
+    return typeof r === "string"
+      ? { content: [{ type: "text", text: r }], details: {} }
+      : { content: r.content, details: {} };
+  };
+}
+
 export default function (pi: ExtensionAPI) {
   // settings.json 的 livingMemory 段（autoTriage / reviewDays）：pi 实例只在 default() 里拿得到，
   // 所以把惰性读器交给 config 持有（jiti 下 export let 的重新赋值不跨模块传播，读器必须与 getSettings 同模块）。
@@ -200,7 +213,7 @@ export default function (pi: ExtensionAPI) {
       confidence: Type.Optional(Type.Number({ description: "basis=inference 必填，0-1" })),
       action_impact: Type.Optional(StringEnum(["advice-only", "reminder", "needs-confirm"])),
     }),
-    async execute(_toolCallId: string, p: any, _sig: any, _upd: any, ctx: any) {
+    execute: toolExecute(async (_toolCallId: string, p: any, _sig: any, _upd: any, ctx: any) => {
       if (isPaused())
         return { content: [{ type: "text", text: "living memory 已被 /memory off 暂停——本次未写入。恢复需用户执行 /memory on。" }] };
       if (p.basis === "inference" && (p.confidence == null || p.confidence < 0 || p.confidence > 1))
@@ -283,7 +296,7 @@ export default function (pi: ExtensionAPI) {
           ? `\n（置信度 ${p.confidence} < ${AUTO_FACT_CONF()} 或属 relation/needs-confirm：保留为推断，只在「待确认」档作弱参考，需 confirm 才按事实处理。）`
           : "";
       return { content: [{ type: "text", text: `已记入长期记忆 ${id}（status=${meta.status}，scope=${meta.scope}）${tail}${sibHint}\n存储: ${entryPath(id)}` }] };
-    },
+    }),
   });
 
   // 工具 2：查询
@@ -312,7 +325,7 @@ export default function (pi: ExtensionAPI) {
       list: Type.Optional(Type.Boolean({ description: "true=精简列表（只回 id/kind/status/subject，不返回标题与正文），浏览巡检用" })),
       limit: Type.Optional(Type.Number()),
     }),
-    async execute(_toolCallId: string, p: any, _sig: any, _upd: any, ctx: any) {
+    execute: toolExecute(async (_toolCallId: string, p: any, _sig: any, _upd: any, ctx: any) => {
       const src: string = p.source || "entries";
       const q = String(p.query ?? "").trim();
       // 文档检索面：todo.md（未完成事项）/ summary.md（工程实况，默认按 cwd 项目分节）
@@ -344,7 +357,7 @@ export default function (pi: ExtensionAPI) {
       }
       // 元数据筛选走索引（一次读盘，frontmatter + 首行摘要）；只有全文匹配时才装载正文
       return { content: [{ type: "text", text: searchEntries(q, p, ctx?.cwd) }] };
-    },
+    }),
   });
 
   // 工具 3：治理
@@ -378,7 +391,7 @@ export default function (pi: ExtensionAPI) {
       kind: Type.Optional(StringEnum(KINDS, { description: "批量 expire 可选：按类别选择" })),
       keep: Type.Optional(Type.Number({ description: "summary_archive 可选：活动 summary.md 保留多少个最新小节，默认 60（LIVING_MEMORY_SUMMARY_KEEP 可改）" })),
     }),
-    async execute(_toolCallId: string, p: any, _sig: any, _upd: any, ctx: any) {
+    execute: toolExecute(async (_toolCallId: string, p: any, _sig: any, _upd: any, ctx: any) => {
       if (String(p.action).startsWith("todo_")) {
         if (isPaused())
           return { content: [{ type: "text", text: "living memory 已被 /memory off 暂停——待办写操作同样不可用（/memory on 恢复）。" }] };
@@ -511,7 +524,7 @@ export default function (pi: ExtensionAPI) {
       }
       refreshWidget(ctx);
       return { content: [{ type: "text", text: msg }] };
-    },
+    }),
   });
 
 // ---------- 画像统计块（profile.md）：只做可计算的事，判断性表述留给四节正文 ----------

@@ -19,3 +19,5 @@ jobs:
           npm install --no-save typebox @earendil-works/pi-ai @earendil-works/pi-coding-agent eslint
       - name: Run tests
         run: bun run test
+      - name: Typecheck (strict, noEmit)
+        run: bun run typecheck
