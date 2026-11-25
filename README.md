@@ -2,33 +2,43 @@
 
 [中文文档](https://github.com/robert-zz/pi-living-memory/blob/main/README.zh-CN.md)
 
-## English quick start
+## Quick start
 
-Durable, auditable long-term memory for a Pi session: facts are records with lifecycle
-metadata (`kind` / `status` / `scope` / expiry / review), engineering state and todos
-live in two plain-markdown documents, and every store has derived indexes so the
-per-turn prompt cost stays flat as the library grows.
-
-- **Install**: `pi install npm:pi-living-memory` (or `git:` / a local path).
-  Remove any copy under `~/.pi/agent/extensions/` first - two instances register duplicate tools and commands (`/memory:1`, `/memory:2`).
-- **Data** lives in `~/.pi/agent/memory/`: `entries/`, `todo.md`, `summary.md`, `profile.md`,
-  `index.json` | `summary-index.json` | `todo-index.json` (derived, rebuildable), `activity.log`,
-  `recovery/`, `expired/`, plus `archive/` when a qmd snapshot exists.
-- **Tools**: `remember` (write) | `living_memory` (query: `entries` / `todo` / `summary` / `archive` / `extract`) |
-  `living_memory_update` (governance: `confirm` / `supersede` / `expire` / `restore`, `todo_*`, `summary_*`,
-  `purge_expired`, `promote_scan`, `style_scan`, `auto_fact`, `profile_rebuild`).
-- **Command**: `/memory` - overview, or `pending` / `todo` / `review` / `profile` / `style` / `on|off`.
-- **Main env vars**: `LIVING_MEMORY_AUTO_FACT` (0.85 - inference becomes fact at or above) |
-  `LIVING_MEMORY_BRIEF_MAX_CHARS` (2400) | `LIVING_MEMORY_EXTRACT` | `LIVING_MEMORY_AUTO_TRIAGE` |
-  `LIVING_MEMORY_PROFILE_BRIEF` | `LIVING_MEMORY_AUTO_FACT_EVIDENCE`.
-- **Before installing, know the defaults**: it writes `~/.pi/agent/memory/`, and by default
-  sends the tail of each conversation to *your own* model provider for memory extraction
-  (`LIVING_MEMORY_EXTRACT=0` disables). The section "Before installing: default behavior" spells out every side effect.
-- **Tests**: `bun tests/run.ts` - 61 cases / 276 assertions against a temporary HOME, never your real store.
-- **Dependencies**: `typebox` and `@earendil-works/*` are host-provided. They are declared as
-  `peerDependencies` and never bundled (a physical copy would bypass Pi's module mapping).
+Durable, auditable long-term memory for a Pi session. Facts are records with lifecycle
+metadata (`kind`, `status`, `scope`, expiry, review); engineering state and todos live in
+two plain-markdown documents; every store keeps a derived index, so the per-turn prompt
+cost stays flat as the library grows.
 
 ![pi-living-memory demo](https://raw.githubusercontent.com/robert-zz/pi-living-memory/main/docs/img/08-demo.gif)
+
+**Install** - `pi install npm:pi-living-memory`, or `git:` / a local path.
+
+**Store** - everything lives in `~/.pi/agent/memory/`: `entries/`, `todo.md`, `summary.md`,
+`profile.md`, the derived indexes `index.json`, `summary-index.json` and `todo-index.json`,
+plus `activity.log`, `recovery/`, `expired/`, and `archive/` when a qmd snapshot exists.
+
+**Tools** - `remember` writes; `living_memory` reads (`entries`, `todo`, `summary`, `archive`,
+`extract`); `living_memory_update` governs (`confirm`, `supersede`, `expire`, `restore`,
+`todo_*`, `summary_*`, `purge_expired`, `promote_scan`, `style_scan`, `auto_fact`,
+`profile_rebuild`).
+
+**Command** - `/memory` for the overview, or `pending`, `todo`, `review`, `profile`, `style`,
+`on` / `off`.
+
+**Environment** - `LIVING_MEMORY_AUTO_FACT` (0.85: inference becomes fact at or above),
+`LIVING_MEMORY_BRIEF_MAX_CHARS` (2400), `LIVING_MEMORY_EXTRACT`, `LIVING_MEMORY_AUTO_TRIAGE`,
+`LIVING_MEMORY_PROFILE_BRIEF`, `LIVING_MEMORY_AUTO_FACT_EVIDENCE`.
+
+**Read this before installing** - the extension writes to `~/.pi/agent/memory/` and by default
+sends the tail of each conversation to *your own* model provider for memory extraction
+(`LIVING_MEMORY_EXTRACT=0` disables). Every side effect is spelled out under
+[Before installing: default behavior](#before-installing-default-behavior).
+
+**Tests** - `bun tests/run.ts`: 61 cases, 276 assertions, all against a temporary HOME -
+never your real store.
+
+**Dependencies** - `typebox` and `@earendil-works/*` come from the Pi host. They are declared
+as `peerDependencies` and never bundled; a physical copy would bypass Pi's module mapping.
 
 ## Before installing: default behavior
 
