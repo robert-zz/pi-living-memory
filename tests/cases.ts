@@ -71,6 +71,17 @@ export const CASES: Meta[] = [
   { id: "extract-decide-split", title: "抽取决策：create/conflict 分流（注入查找函数）", seed: "empty" },
   { id: "extract-decide-isolated", title: "抽取决策：单条冲突不影响其它候选", seed: "empty" },
   { id: "extract-decide-empty", title: "抽取决策：candidates 为空返回空且不查库", seed: "empty" },
+  { id: "extract-gate-config", title: "抽取硬闸：LIVING_MEMORY_EXTRACT_GATE 默认拦 / 0=影子", seed: "empty" },
+  { id: "extract-gate-user-turns", title: "抽取硬闸：userTurnsText 只取用户轮次且不受 6000 截断", seed: "empty" },
+  { id: "extract-gate-quote-missing", title: "抽取硬闸：quote 缺失/过短 → unverified", seed: "empty" },
+  { id: "extract-gate-quote-foreign", title: "抽取硬闸：quote 来自 assistant/任务书 → unverified", seed: "empty" },
+  { id: "extract-gate-quote-verbatim", title: "抽取硬闸：用户原话逐字 quote 正常 create", seed: "empty" },
+  { id: "extract-gate-noise-command", title: "抽取硬闸：命令/工具正文 → noise", seed: "empty" },
+  { id: "extract-gate-noise-process", title: "抽取硬闸：过程自述正文 → noise", seed: "empty" },
+  { id: "extract-gate-selfref-body", title: "抽取硬闸：正文自指插件 → self-ref", seed: "empty" },
+  { id: "extract-gate-mode", title: "抽取硬闸：enforce 拦下 / shadow 只记录", seed: "empty" },
+  { id: "extract-gate-ledger", title: "抽取硬闸：台账滚动保留 200 条", seed: "empty" },
+  { id: "extract-gate-health", title: "抽取硬闸：source=extract 输出被闸统计", seed: "empty" },
 ];
 
 const fmText = (fields: Record<string, string>, body: string) =>
@@ -1249,6 +1260,162 @@ async function body(id: string, home: string) {
       });
       ok("空 candidates 返回空数组", Array.isArray(out) && out.length === 0, JSON.stringify(out));
       ok("空批次不调用查找函数", calls === 0, `calls=${calls}`);
+      return;
+    }
+    case "extract-gate-config": {
+      const { loadConfig } = await import("./under-test/src/config.ts");
+      ok("默认（未设）→ 拦", loadConfig({}).extractGate === true);
+      ok("LIVING_MEMORY_EXTRACT_GATE=1 → 拦", loadConfig({ LIVING_MEMORY_EXTRACT_GATE: "1" }).extractGate === true);
+      ok("LIVING_MEMORY_EXTRACT_GATE=0 → 影子", loadConfig({ LIVING_MEMORY_EXTRACT_GATE: "0" }).extractGate === false);
+      ok("其它抽取开关仍按原口径解析", loadConfig({}).extractTimeoutMs === 20000);
+      return;
+    }
+    case "extract-gate-user-turns": {
+      const { userTurnsText, conversationText } = await import("./under-test/src/extract.ts");
+      const long = "助手过程".repeat(1600);
+      const msgs = [
+        { role: "user", content: [{ type: "text", text: "早先的承诺：周五前给报价单。" }] },
+        { role: "assistant", content: long },
+        { role: "tool", content: "git status" },
+      ];
+      const u = userTurnsText(msgs);
+      ok("只取 user 轮次（忽略 assistant/tool）", u === "早先的承诺：周五前给报价单。", u.slice(0, 60));
+      ok("空白归一化后拼接", userTurnsText([{ role: "user", content: "  第一行\n\n第二行  " }]) === "第一行 第二行");
+      const c = conversationText(msgs);
+      ok("conversationText 受 6000 截断，userTurnsText 不受影响", c.length === 6000 && u.length < c.length && !c.includes("早先的承诺"), `${c.length}/${u.length}`);
+      return;
+    }
+    case "extract-gate-quote-missing": {
+      const { normalizeExtractionItems, applyExtractionGate } = await import("./under-test/src/extract.ts");
+      const user = "以后周报先写结论，再列数据，最后给风险。";
+      const r = normalizeExtractionItems([
+        { kind: "preference", subject: "周报格式甲", text: "周报先写结论", confidence: 0.9 },
+        { kind: "preference", subject: "周报格式乙", text: "周报先写结论", quote: "结论", confidence: 0.9 },
+        { kind: "preference", subject: "周报格式丙", text: "周报先写结论", quote: "以后周报先写结论", confidence: 0.9 },
+      ]);
+      ok(
+        "normalize 携带 quote（缺省为空串）",
+        r.candidates[0]?.quote === "" && r.candidates[2]?.quote === "以后周报先写结论",
+        JSON.stringify(r.candidates.map((c) => c.quote)),
+      );
+      const g = applyExtractionGate(r.candidates, user, "enforce");
+      ok("quote 缺失 → unverified", g.gated[0]?.reason === "unverified", JSON.stringify(g.gated[0]));
+      ok("quote 短于 6 字符 → unverified", g.gated.some((x) => x.candidate.subject === "周报格式乙" && x.reason === "unverified"), JSON.stringify(g.gated.map((x) => x.reason)));
+      ok("合资格 quote 通过", g.accepted.some((c) => c.subject === "周报格式丙"), JSON.stringify(g.accepted.map((c) => c.subject)));
+      return;
+    }
+    case "extract-gate-quote-foreign": {
+      const { userTurnsText, applyExtractionGate } = await import("./under-test/src/extract.ts");
+      const msgs = [
+        { role: "user", content: "帮我整理一下发布清单。" },
+        { role: "assistant", content: "发布清单：先跑 pnpm build，再打 tag。" },
+      ];
+      const candidates = [
+        { kind: "decision", subject: "发布步骤", body: "发布前先打 tag", confidence: 0.8, quote: "发布清单：先跑 pnpm build，再打 tag。" },
+        { kind: "decision", subject: "任务书约束", body: "只 commit 不 push", confidence: 0.9, quote: "禁 git add -A / 只 commit 不 push" },
+      ];
+      const g = applyExtractionGate(candidates, userTurnsText(msgs), "enforce");
+      ok("quote 只出现在 assistant 文本 → unverified", g.gated[0]?.reason === "unverified" && g.gated[0]?.candidate.subject === "发布步骤", JSON.stringify(g.gated[0]));
+      ok("quote 来自任务书（用户没说过）→ unverified", g.gated[1]?.reason === "unverified" && g.accepted.length === 0, JSON.stringify(g.accepted));
+      return;
+    }
+    case "extract-gate-quote-verbatim": {
+      const { userTurnsText, applyExtractionGate, decideExtractionBatch } = await import("./under-test/src/extract.ts");
+      const msgs = [
+        { role: "user", content: [{ type: "text", text: "以后周报都按「先写结论，\n再列数据」的格式。" }] },
+        { role: "assistant", content: "好的，我记住了。" },
+      ];
+      const candidates = [{ kind: "preference", subject: "周报格式", body: "周报先写结论，再列数据", confidence: 0.9, quote: "先写结论，  再列数据" }];
+      const g = applyExtractionGate(candidates, userTurnsText(msgs), "enforce");
+      ok("逐字 quote（空白差异归一后）通过", g.accepted.length === 1 && g.gated.length === 0, JSON.stringify(g));
+      const decisions = decideExtractionBatch(g.accepted, () => false);
+      ok("正例不被误杀：verdict=create", decisions[0]?.verdict === "create", JSON.stringify(decisions[0]));
+      return;
+    }
+    case "extract-gate-noise-command": {
+      const { isProcessNoise, applyExtractionGate } = await import("./under-test/src/extract.ts");
+      ok("禁 git add -A / 只 commit 不 push → noise", isProcessNoise("禁 git add -A / 只 commit 不 push"));
+      ok("pnpm build 通过 → noise", isProcessNoise("pnpm build 通过"));
+      ok("``` 围栏 → noise", isProcessNoise("```json\n[]\n```"));
+      ok("行首 $ 命令 → noise", isProcessNoise("$ bun tests/run.ts"));
+      ok(
+        "仓库路径 / commit hash → noise",
+        isProcessNoise("改动在 extensions/src/extract.ts") && isProcessNoise("commit 0123456789abcdef0123456789abcdef01234567"),
+      );
+      const user = "以后发布前先跑一次 pnpm build。";
+      const candidates = [{ kind: "decision", subject: "发布步骤", body: "禁 git add -A / 只 commit 不 push", confidence: 0.9, quote: "以后发布前先跑一次" }];
+      const g = applyExtractionGate(candidates, user, "enforce");
+      ok("enforce 下命令正文被拦（quote 合法也拦）", g.accepted.length === 0 && g.gated[0]?.reason === "noise", JSON.stringify(g));
+      return;
+    }
+    case "extract-gate-noise-process": {
+      const { isProcessNoise } = await import("./under-test/src/extract.ts");
+      ok("「我已把索引改好并验证」→ noise", isProcessNoise("我已把索引改好并验证"));
+      ok("「本轮跑了三次测试」→ noise", isProcessNoise("本轮跑了三次测试"));
+      ok("普通用户事实不误伤", !isProcessNoise("用户偏好先给结论再给依据"), "用户偏好先给结论再给依据");
+      ok("引用用户原话的偏好不被过程规则误伤", !isProcessNoise("周报先写结论，再列数据"), "周报先写结论，再列数据");
+      return;
+    }
+    case "extract-gate-selfref-body": {
+      const { applyExtractionGate } = await import("./under-test/src/extract.ts");
+      const user = "以后别把实现细节写进记忆。";
+      const candidates = [
+        { kind: "decision", subject: "用户偏好", body: "抽取器改了 extensions/src/extract.ts 的过滤", confidence: 0.9, quote: "以后别把实现细节写进记忆" },
+        { kind: "decision", subject: "用户偏好", body: "LIVING_MEMORY_EXTRACT_GATE=0 时改为影子", confidence: 0.9, quote: "以后别把实现细节" },
+      ];
+      const g = applyExtractionGate(candidates, user, "enforce");
+      ok("正文 extensions/src/... → self-ref（先于 noise）", g.gated[0]?.reason === "self-ref", JSON.stringify(g.gated[0]));
+      ok("正文 LIVING_MEMORY_ → self-ref", g.gated[1]?.reason === "self-ref", JSON.stringify(g.gated[1]));
+      ok("正文 self-ref 不立条目", g.accepted.length === 0);
+      return;
+    }
+    case "extract-gate-mode": {
+      const L = await load(home, AUTO_OFF);
+      const { applyExtractionGate, recordExtractionGates } = await import("./under-test/src/extract.ts");
+      const user = "以后发布前先跑一次 pnpm build。";
+      const candidates = [{ kind: "decision", subject: "用户决策", body: "禁 git add -A / 只 commit 不 push", confidence: 0.9, quote: "以后发布前先跑一次" }];
+      const enforce = applyExtractionGate(candidates, user, "enforce");
+      const shadow = applyExtractionGate(candidates, user, "shadow");
+      ok("enforce：命中的候选被拦下", enforce.accepted.length === 0 && enforce.gated[0]?.reason === "noise", JSON.stringify(enforce));
+      ok(
+        "shadow：gated 照记但 accepted 不丢",
+        shadow.accepted.length === 1 && shadow.gated.length === 1 && shadow.accepted[0] === candidates[0],
+        JSON.stringify({ accepted: shadow.accepted.length, gated: shadow.gated.length }),
+      );
+      recordExtractionGates(shadow.gated, "agent_settled", "shadow");
+      const ledger = read(home, "extract-gates.jsonl").trim().split("\n").filter(Boolean);
+      ok("shadow 被闸仍写台账", ledger.length === 1 && JSON.parse(ledger[0]).reason === "noise", ledger[0]?.slice(0, 80));
+      const act = read(home, "activity.log");
+      ok("activity.log 记 gated 行并标注 shadow", act.includes("auto-extract gated noise") && act.includes("shadow"), act.slice(-120));
+      ok("闸不碰手工写入的 remember 路径", out(await L.call("remember", { kind: "decision", subject: "手工写入验证", text: "手工 remember 不走抽取闸", basis: "explicit", source: "test" })).includes("已记入"));
+      return;
+    }
+    case "extract-gate-ledger": {
+      const { recordExtractionGates } = await import("./under-test/src/extract.ts");
+      const candidate = { kind: "decision", subject: "台账滚动", body: "正文".repeat(80), confidence: 0.9, quote: "引用".repeat(40) };
+      for (let i = 0; i < 205; i++) recordExtractionGates([{ candidate, reason: "noise" }], "test", "enforce");
+      const lines = read(home, "extract-gates.jsonl").trim().split("\n").filter(Boolean);
+      ok("台账最多保留 200 条", lines.length === 200, `${lines.length} 行`);
+      const row = JSON.parse(lines[lines.length - 1]);
+      ok("行字段齐全", ["ts", "reason", "kind", "subject", "body", "quote"].every((k) => Object.hasOwn(row, k)), Object.keys(row).join(","));
+      ok("body 截到 120 字符 / quote 截到 60", row.body.length === 120 && row.quote.length === 60, `${row.body.length}/${row.quote.length}`);
+      return;
+    }
+    case "extract-gate-health": {
+      const L = await load(home, AUTO_OFF);
+      const hoursAgo = (h: number) => new Date(Date.now() - h * 3600e3).toISOString();
+      fs.writeFileSync(
+        path.join(mem(home), "extract-gates.jsonl"),
+        [
+          JSON.stringify({ ts: hoursAgo(1), reason: "noise", kind: "decision", subject: "发布步骤", body: "禁 git add -A / 只 commit 不 push", quote: "以后发布前先跑一次" }),
+          JSON.stringify({ ts: hoursAgo(2), reason: "unverified", kind: "preference", subject: "报价承诺", body: "早先承诺：周五给报价单", quote: "周五前给报价单" }),
+          JSON.stringify({ ts: hoursAgo(24 * 9), reason: "noise", kind: "decision", subject: "旧记录", body: "旧记录正文", quote: "旧引文" }),
+        ].join("\n") + "\n",
+      );
+      const t = out(await L.call("living_memory", { source: "extract" }));
+      ok("无失败时也输出被闸统计", /gate：近 7 天被闸 2 条/.test(t), t.split("\n").find((l) => l.startsWith("gate：")));
+      ok("原因分布按 reason 计数", /noise 1/.test(t) && /unverified 1/.test(t), t.match(/（[^）]*）/)?.[0]);
+      ok("列出最近 5 条正文摘要", t.includes("禁 git add -A") && t.includes("早先承诺"), t.split("\n").slice(-3).join(" | ").slice(0, 120));
       return;
     }
     default:

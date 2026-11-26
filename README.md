@@ -34,7 +34,7 @@ sends the tail of each conversation to *your own* model provider for memory extr
 (`LIVING_MEMORY_EXTRACT=0` disables). Every side effect is spelled out under
 [Before installing: default behavior](#before-installing-default-behavior).
 
-**Tests** - `bun tests/run.ts`: 61 cases, 276 assertions, all against a temporary HOME -
+**Tests** - `bun tests/run.ts`: 72 cases, 315 assertions, all against a temporary HOME -
 never your real store.
 
 **Dependencies** - `typebox` and `@earendil-works/*` come from the Pi host. They are declared
@@ -171,6 +171,7 @@ No matter how many entries the library holds, the context never blows up.
 | `LIVING_MEMORY_EXTRACT` | on | `0` disables automatic extraction |
 | `LIVING_MEMORY_EXTRACT_MODEL` | host default model | model used for extraction (`provider/model-id`) |
 | `LIVING_MEMORY_EXTRACT_TIMEOUT_MS` | see source | extraction timeout |
+| `LIVING_MEMORY_EXTRACT_GATE` | on | `0` records gate hits without blocking (shadow mode) |
 | `LIVING_MEMORY_AUTO_TRIAGE` | on | `0` disables session-start auto cleanup (tier A) |
 | `LIVING_MEMORY_NO_AUTO_REVIEW` | off | disables auto-marking entries pending at their review date |
 | `LIVING_MEMORY_RECOVERY_DAYS` | 180 | days `recovery/` snapshots are kept |
@@ -252,7 +253,7 @@ score = confidence * 0.40                  # self-rating contributes at most 40%
 ## Tests
 
 ```bash
-bun tests/run.ts            # all (61 cases / 276 assertions, about 4s)
+bun tests/run.ts            # all (72 cases / 315 assertions, about 5s)
 bun tests/run.ts --only brief
 bun tests/run.ts --list
 ```

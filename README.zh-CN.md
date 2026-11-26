@@ -132,6 +132,7 @@ pi install /path/to/pi-living-memory
 | `LIVING_MEMORY_EXTRACT` | 开 | `0` 关掉自动抽取 |
 | `LIVING_MEMORY_EXTRACT_MODEL` | 宿主默认模型 | 抽取用的模型 |
 | `LIVING_MEMORY_EXTRACT_TIMEOUT_MS` | 见源码 | 抽取超时 |
+| `LIVING_MEMORY_EXTRACT_GATE` | 开 | `0` 时四层硬闸只记录不拦（影子模式） |
 | `LIVING_MEMORY_AUTO_TRIAGE` | 开 | `0` 关掉会话启动自动清理（A 档） |
 | `LIVING_MEMORY_NO_AUTO_REVIEW` | 关 | 关掉复核期自动标 pending |
 | `LIVING_MEMORY_RECOVERY_DAYS` | 180 | recovery 快照保留天数 |
@@ -204,7 +205,7 @@ score = confidence × 0.40        # 自评最多 40%
 ## 测试
 
 ```bash
-bun tests/run.ts            # 全部（61 用例 / 276 断言，约 4s）
+bun tests/run.ts            # 全部（72 用例 / 315 断言，约 5s）
 bun tests/run.ts --only brief
 bun tests/run.ts --list
 ```

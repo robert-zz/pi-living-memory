@@ -20,6 +20,7 @@ export const PAUSE_FLAG = path.join(STORE, "paused");
 export const MISS_FILE = path.join(STORE, "miss.log");
 export const INDEX_FILE = path.join(STORE, "index.json");
 export const EXTRACT_FAIL_FILE = path.join(STORE, "extract-failures.jsonl");
+export const EXTRACT_GATE_FILE = path.join(STORE, "extract-gates.jsonl");
 export const TODO_FILE = path.join(STORE, "todo.md");
 export const TODO_ARCHIVE_FILE = path.join(STORE, "todo-archive.md");
 export const TODO_INDEX_FILE = path.join(STORE, "todo-index.json");

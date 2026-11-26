@@ -38,7 +38,7 @@ extensions/living-memory.ts      壳：pi 注册、工具 schema、事件接线�
 ```bash
 cd /path/to/pi-living-memory
 # 改 extensions/ 下的代码
-bun tests/run.ts          # 61 用例 / 276 断言，跑在临时 HOME，不碰真库
+bun tests/run.ts          # 72 用例 / 315 断言，跑在临时 HOME，不碰真库
 bun run typecheck         # strict 类型门禁（需先跑 tests 生成 under-test）
 /reload                   # 包路径就是本目录，pi 重新读盘即生效
 git commit -am "..." && git tag v0.x.y
@@ -49,7 +49,7 @@ git commit -am "..." && git tag v0.x.y
 ## 类型门禁
 
 ```bash
-bun tests/run.ts          # 61 用例 / 276 断言；同时把源码复制成 tests/under-test/
+bun tests/run.ts          # 72 用例 / 315 断言；同时把源码复制成 tests/under-test/
 bun run typecheck         # tsc --noEmit（strict）；无输出即通过
 ```
 

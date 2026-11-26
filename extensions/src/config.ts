@@ -55,6 +55,8 @@ export interface Config {
   extractModel: string;
   /** LIVING_MEMORY_EXTRACT_TIMEOUT_MS：抽取超时 */
   extractTimeoutMs: number;
+  /** LIVING_MEMORY_EXTRACT_GATE=0：抽取硬闸只记录不拦（影子模式） */
+  extractGate: boolean;
   /** LIVING_MEMORY_START_HINTS != 0：session_start 提示开关 */
   startHints: boolean;
   /** LIVING_MEMORY_AUTO_ARCHIVE_KEEP：自动归档 summary 的保留节数 */
@@ -98,6 +100,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     extractEnabled: env.LIVING_MEMORY_EXTRACT !== "0",
     extractModel: (env.LIVING_MEMORY_EXTRACT_MODEL ?? "").trim(),
     extractTimeoutMs: Number(env.LIVING_MEMORY_EXTRACT_TIMEOUT_MS ?? 20000),
+    extractGate: env.LIVING_MEMORY_EXTRACT_GATE !== "0",
     startHints: env.LIVING_MEMORY_START_HINTS !== "0",
     autoArchiveKeep: Number(env.LIVING_MEMORY_AUTO_ARCHIVE_KEEP ?? 120),
     autoArchive: env.LIVING_MEMORY_AUTO_ARCHIVE === "1",
