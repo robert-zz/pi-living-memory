@@ -76,9 +76,12 @@ export const CASES: Meta[] = [
   { id: "extract-gate-quote-missing", title: "抽取硬闸：quote 缺失/过短 → unverified", seed: "empty" },
   { id: "extract-gate-quote-foreign", title: "抽取硬闸：quote 来自 assistant/任务书 → unverified", seed: "empty" },
   { id: "extract-gate-quote-verbatim", title: "抽取硬闸：用户原话逐字 quote 正常 create", seed: "empty" },
-  { id: "extract-gate-noise-command", title: "抽取硬闸：命令/工具正文 → noise", seed: "empty" },
+  { id: "extract-gate-noise-command", title: "抽取硬闸：正文只拦结构性垃圾（围栏/hash）", seed: "empty" },
   { id: "extract-gate-noise-process", title: "抽取硬闸：过程自述正文 → noise", seed: "empty" },
-  { id: "extract-gate-selfref-body", title: "抽取硬闸：正文自指插件 → self-ref", seed: "empty" },
+  { id: "extract-gate-selfref-body", title: "抽取硬闸：正文含插件 token 放行（引文优先）", seed: "empty" },
+  { id: "extract-gate-quote-fixtures", title: "抽取硬闸：6 条真实正文（命令/路径/任务书词）全部 create", seed: "empty" },
+  { id: "extract-gate-structural", title: "抽取硬闸：hash/围栏仍拦，任务书词组合只作辅助判定", seed: "empty" },
+  { id: "extract-gate-process-verified", title: "抽取硬闸：过程自述在引文验过后不拦", seed: "empty" },
   { id: "extract-gate-mode", title: "抽取硬闸：enforce 拦下 / shadow 只记录", seed: "empty" },
   { id: "extract-gate-ledger", title: "抽取硬闸：台账滚动保留 200 条", seed: "empty" },
   { id: "extract-gate-health", title: "抽取硬闸：source=extract 输出被闸统计", seed: "empty" },
@@ -1334,18 +1337,13 @@ async function body(id: string, home: string) {
     }
     case "extract-gate-noise-command": {
       const { isProcessNoise, applyExtractionGate } = await import("./under-test/src/extract.ts");
-      ok("禁 git add -A / 只 commit 不 push → noise", isProcessNoise("禁 git add -A / 只 commit 不 push"));
-      ok("pnpm build 通过 → noise", isProcessNoise("pnpm build 通过"));
       ok("``` 围栏 → noise", isProcessNoise("```json\n[]\n```"));
-      ok("行首 $ 命令 → noise", isProcessNoise("$ bun tests/run.ts"));
-      ok(
-        "仓库路径 / commit hash → noise",
-        isProcessNoise("改动在 extensions/src/extract.ts") && isProcessNoise("commit 0123456789abcdef0123456789abcdef01234567"),
-      );
+      ok("40 位 commit hash → noise", isProcessNoise("commit 0123456789abcdef0123456789abcdef01234567"));
+      ok("命令/路径正文不再是噪声（用户可能原话提及）", !isProcessNoise("pnpm build 通过") && !isProcessNoise("$ bun tests/run.ts") && !isProcessNoise("改动在 extensions/src/extract.ts"));
       const user = "以后发布前先跑一次 pnpm build。";
       const candidates = [{ kind: "decision", subject: "发布步骤", body: "禁 git add -A / 只 commit 不 push", confidence: 0.9, quote: "以后发布前先跑一次" }];
       const g = applyExtractionGate(candidates, user, "enforce");
-      ok("enforce 下命令正文被拦（quote 合法也拦）", g.accepted.length === 0 && g.gated[0]?.reason === "noise", JSON.stringify(g));
+      ok("quote 合法时命令正文放行（不再按 token 误杀）", g.accepted.length === 1 && g.gated.length === 0, JSON.stringify(g));
       return;
     }
     case "extract-gate-noise-process": {
@@ -1362,18 +1360,67 @@ async function body(id: string, home: string) {
       const candidates = [
         { kind: "decision", subject: "用户偏好", body: "抽取器改了 extensions/src/extract.ts 的过滤", confidence: 0.9, quote: "以后别把实现细节写进记忆" },
         { kind: "decision", subject: "用户偏好", body: "LIVING_MEMORY_EXTRACT_GATE=0 时改为影子", confidence: 0.9, quote: "以后别把实现细节" },
+        { kind: "decision", subject: "用户偏好", body: "查询走 living_memory(/memory) 工具", confidence: 0.9, quote: "以后别把实现细节" },
       ];
       const g = applyExtractionGate(candidates, user, "enforce");
-      ok("正文 extensions/src/... → self-ref（先于 noise）", g.gated[0]?.reason === "self-ref", JSON.stringify(g.gated[0]));
-      ok("正文 LIVING_MEMORY_ → self-ref", g.gated[1]?.reason === "self-ref", JSON.stringify(g.gated[1]));
-      ok("正文 self-ref 不立条目", g.accepted.length === 0);
+      ok("正文 extensions/src/... 不再被闸", g.accepted.some((c) => c.body.includes("extensions/src/")), JSON.stringify(g.gated));
+      ok("正文 LIVING_MEMORY_ / living_memory( 不再被闸", g.accepted.length === 3 && g.gated.length === 0, JSON.stringify(g.gated));
+      ok("插件 token 只在 subject 讲自身时于归一阶段过滤", g.accepted.every((c) => !c.subject.includes("LIVING_MEMORY")));
+      return;
+    }
+    case "extract-gate-quote-fixtures": {
+      const { applyExtractionGate, decideExtractionBatch } = await import("./under-test/src/extract.ts");
+      const fixtures = [
+        { subject: "vault 里 git add 铁律", body: "vault 里禁止 git add -A / git add .：会被其它并行会话未提交的改动混入…铁律=git add 逐个列具体路径", quote: "vault 里禁止 git add -A" },
+        { subject: "git commit 确认纪律", body: "所有 git commit 必须先经用户确认才能提交：agent 只改动+暂存…git push 同理需用户确认", quote: "所有 git commit 必须先经用户确认" },
+        { subject: "itsfun 仓 push 纪律", body: "itsfun 仓永远不执行 git push（提交须用户确认，push 由用户自己处理）", quote: "itsfun 仓永远不执行 git push" },
+        { subject: "对外文本纯文本版", body: "用户要求：对外文本必须附纯文本版、不带 markdown；多处出现必须一致", quote: "对外文本必须附纯文本版" },
+        { subject: "输入法习惯", body: "用户输入法习惯用双拼，输入框默认全角", quote: "用户输入法习惯用双拼" },
+        { subject: "Upwork 岗位发现渠道", body: "Upwork 岗位发现改走公开 SEO 页扫描而非 Google site: 搜索：脚本 vault/20_Concepts/…/upwork-scan.ts", quote: "Upwork 岗位发现改走公开 SEO 页扫描" },
+      ];
+      const user = `${fixtures.map((f) => f.quote).join("。")}。`;
+      const candidates = fixtures.map((f, i) => ({ kind: i === 4 ? "preference" : "decision", subject: f.subject, body: f.body, confidence: 0.9, quote: f.quote }));
+      const g = applyExtractionGate(candidates, user, "enforce");
+      ok("6 条真实正文全部放行", g.accepted.length === 6, JSON.stringify(g.gated.map((x) => x.reason)));
+      ok("0 条被闸", g.gated.length === 0, JSON.stringify(g.gated.map((x) => x.candidate.subject)));
+      const decisions = decideExtractionBatch(g.accepted, () => false);
+      ok("6 条全部 verdict=create", decisions.length === 6 && decisions.every((d) => d.verdict === "create"), JSON.stringify(decisions.map((d) => d.verdict)));
+      for (const f of fixtures) ok(`正文逐字保留：${f.subject}`, decisions.some((d) => d.candidate.body === f.body));
+      return;
+    }
+    case "extract-gate-structural": {
+      const { isProcessNoise, applyExtractionGate } = await import("./under-test/src/extract.ts");
+      const user = "以后发布前先跑一次 pnpm build。";
+      const candidates = [
+        { kind: "decision", subject: "发布步骤", body: "提交 0123456789abcdef0123456789abcdef01234567 后再发布", confidence: 0.9, quote: "以后发布前先跑一次 pnpm build" },
+        { kind: "decision", subject: "命令片段", body: "```\nbun tests/run.ts\n```", confidence: 0.9, quote: "以后发布前先跑一次" },
+        { kind: "decision", subject: "任务书约束", body: "禁 git add -A / 只 commit 不 push", confidence: 0.9, quote: "禁 git add -A / 只 commit 不 push" },
+      ];
+      const g = applyExtractionGate(candidates, user, "enforce");
+      ok("正文含 40 位 hash → noise", g.gated[0]?.reason === "noise", JSON.stringify(g.gated[0]));
+      ok("正文含代码围栏 → noise", g.gated[1]?.reason === "noise", JSON.stringify(g.gated[1]));
+      ok("任务书 quote 不在用户原话 → unverified（先于正文规则）", g.gated[2]?.reason === "unverified", JSON.stringify(g.gated[2]));
+      ok("「禁 git add -A…」本身不是结构性垃圾", !isProcessNoise("禁 git add -A / 只 commit 不 push"));
+      ok("≥2 个不同任务书词 → noise（辅助判定）", isProcessNoise("背景：发布；要求：先跑测试；验收标准：全绿"));
+      ok("行首 # + 任务书词 + 冒号 → noise", isProcessNoise("# 要求：先跑测试"));
+      ok("单个任务书词（用户要求…）不算任务书", !isProcessNoise("用户要求：对外文本带纯文本版"));
+      return;
+    }
+    case "extract-gate-process-verified": {
+      const { isProcessNoise, applyExtractionGate, decideExtractionBatch } = await import("./under-test/src/extract.ts");
+      const user = "我已把索引改好并验证，以后都这样收尾。";
+      const candidates = [{ kind: "preference", subject: "收尾方式", body: "我已把索引改好并验证", confidence: 0.9, quote: "我已把索引改好并验证" }];
+      const g = applyExtractionGate(candidates, user, "enforce");
+      ok("引文验过后过程自述正文不被拦", g.accepted.length === 1 && g.gated.length === 0, JSON.stringify(g.gated));
+      ok("同句单独判定仍是过程自述", isProcessNoise("我已把索引改好并验证"));
+      ok("放行后 verdict=create", decideExtractionBatch(g.accepted, () => false)[0]?.verdict === "create");
       return;
     }
     case "extract-gate-mode": {
       const L = await load(home, AUTO_OFF);
       const { applyExtractionGate, recordExtractionGates } = await import("./under-test/src/extract.ts");
       const user = "以后发布前先跑一次 pnpm build。";
-      const candidates = [{ kind: "decision", subject: "用户决策", body: "禁 git add -A / 只 commit 不 push", confidence: 0.9, quote: "以后发布前先跑一次" }];
+      const candidates = [{ kind: "decision", subject: "用户决策", body: "commit 0123456789abcdef0123456789abcdef01234567", confidence: 0.9, quote: "以后发布前先跑一次" }];
       const enforce = applyExtractionGate(candidates, user, "enforce");
       const shadow = applyExtractionGate(candidates, user, "shadow");
       ok("enforce：命中的候选被拦下", enforce.accepted.length === 0 && enforce.gated[0]?.reason === "noise", JSON.stringify(enforce));

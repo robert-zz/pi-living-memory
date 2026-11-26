@@ -128,10 +128,10 @@ remember kind=preference subject=用户 代码风格 text="偏好简短回复，
 模型回合结束后，扩展会把这一轮对话丢给「抽取器」模型，产出最多 3 条候选，写进 `status=inference`：
 
 - 自指内容（记忆系统自身状态）、过程性事项（提案/瞬时 git 状态）、工程实现细节（「我们加了某索引」）**一律不抽**，归 `summary.md`；
-- 抽取结果还要过四层确定性硬闸（`extensions/src/extract.ts` 纯函数；手工 `remember` 不走闸）：
-  - **L0 溯源**：候选必须带 `quote`（用户原话逐字引文）；缺失、短于 6 字符或对不上本轮用户轮次 → `unverified` 丢弃，不回退；
-  - **L1 噪声**：正文含命令/工具 token、仓库路径、任务书词汇，或「我已改/修/跑/验证」这类过程自述 → `noise` 丢弃；
-  - **L2 自指**：正文讲记忆插件自身（`LIVING_MEMORY_`、`/memory`、`living_memory(`、`extensions/src/`）→ `self-ref` 丢弃；
+- 抽取结果还要过确定性硬闸（`extensions/src/extract.ts` 纯函数；手工 `remember` 不走闸）：
+  - **引文溯源（唯一强闸）**：候选必须带 `quote`（用户原话逐字引文）；缺失、短于 6 字符或对不上本轮用户轮次 → `unverified` 丢弃，不回退；
+  - **结构性垃圾**：引文验过之后，正文只拦 40 位十六进制（commit hash）与代码围栏（`` ``` ``）→ `noise`；用户原话里的命令、路径、任务书词、过程自述都算事实，不再据此拦截；
+  - **subject 自指**在归一阶段另行过滤（`normalizeExtractionItems` → `self-ref` skip），不进入候选；
   - 被闸记录落 `extract-gates.jsonl`（最近 200 条），`source=extract` 可看近 7 天被闸条数与原因分布；
 - 先观察不拦：`LIVING_MEMORY_EXTRACT_GATE=0` 进入影子模式，照样记账但候选继续落库，用来评估误杀率后再收紧；
 - 失败不再静默：落 `extract-failures.jsonl`，`source=extract` 可查原因与原文片段，24 小时内失败会在开屏提示；

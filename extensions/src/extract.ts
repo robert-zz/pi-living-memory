@@ -249,46 +249,36 @@ export function normalizeExtractionItems(value: unknown): NormalizedExtraction {
   return { candidates, skipped };
 }
 
-/** 硬闸跳过原因：unverified=引文对不上用户原话，noise=命令/路径/任务书/过程自述，self-ref=正文讲插件自身 */
-export type ExtractionGateReason = "unverified" | "noise" | "self-ref";
+/** 硬闸跳过原因：unverified=引文对不上用户原话，noise=正文结构性垃圾（commit hash/代码围栏） */
+export type ExtractionGateReason = "unverified" | "noise";
 /** enforce=拦下并记账；shadow=只记账不拦（LIVING_MEMORY_EXTRACT_GATE=0） */
 export type ExtractionGateMode = "enforce" | "shadow";
 export type ExtractionGateHit = { candidate: ExtractionCandidate; reason: ExtractionGateReason };
 export type ExtractionGateResult = { accepted: ExtractionCandidate[]; gated: ExtractionGateHit[] };
 
-/** 命令/工具 token、仓库数据路径、任务书词汇：命中即判过程噪声，只抽用户事实、不抄过程 */
-const PROCESS_NOISE_RES: RegExp[] = [
-  /(?:^|[\s，。；、])(?:git|npm|bun|pnpm|tsc)\s/,
-  /(?:^|[\s，。；、])--[^\s]/,
-  /```/,
-  /&&/,
-  /^\$ /m,
-  /extensions\//,
-  /\/src\//,
-  /\.ts\b/,
-  /package\.json/,
-  /~\/\.pi\/agent/,
-  /docs\//,
-  /tests\/run\.ts/,
-  /[0-9a-f]{40}/i,
-  /(?:背景|输入|要求|输出格式|验收标准|委派|子代理|任务书|worker|scout|reviewer)/i,
-];
-/** 正文以这些词开头且含实现动词 → 助手/工具的过程自述，不是用户事实 */
+/** 结构性垃圾：40 位十六进制（commit hash）与代码围栏；引文验过后仍拦，其余正文一律放行 */
+const STRUCTURAL_NOISE_RES: RegExp[] = [/[0-9a-f]{40}/i, /```/];
+/** 任务书结构词：单独出现常是用户事实（如「用户要求…」），≥2 个不同词才判任务书正文 */
+const TASKBOOK_WORD_RE = /(背景|输入|要求|输出格式|验收标准|禁止事项|委派|子代理|任务书|worker|scout|reviewer)/gi;
+/** 行首 # 或 ** 加任务书词与冒号：任务书小节标题（如「# 要求：…」） */
+const TASKBOOK_HEADING_RE = /^[#*]+\s*(背景|输入|要求|输出格式|验收标准|禁止事项|委派|子代理|任务书|worker|scout|reviewer)\s*[:：]/im;
+/** 正文以这些词开头且含实现动词 → 助手/工具的过程自述，不是用户事实（仅 isProcessNoise 判定，硬闸不套用） */
 const PROCESS_LEAD_RE = /^(?:已|我|我们|现已|刚才|本轮|这一轮)/;
 const PROCESS_VERB_RE = /(改|修|跑|推|提交|删|加|验证|复验|实现)/;
-/** L2 正文自指：讲记忆插件自身的实现/参数/工具调用 */
-const BODY_SELF_REF_RE = /LIVING_MEMORY_|\/memory\b|living_memory\(|remember\(|extensions\/src\//;
 
 export function isProcessNoise(body: string): boolean {
   const b = String(body ?? "").trim();
   if (!b) return false;
-  if (PROCESS_NOISE_RES.some((re) => re.test(b))) return true;
+  if (STRUCTURAL_NOISE_RES.some((re) => re.test(b))) return true;
+  if (TASKBOOK_HEADING_RE.test(b)) return true;
+  const words = new Set((b.match(TASKBOOK_WORD_RE) ?? []).map((w) => w.toLowerCase()));
+  if (words.size >= 2) return true;
   return PROCESS_LEAD_RE.test(b) && PROCESS_VERB_RE.test(b);
 }
 
 /**
- * L0–L2 硬闸（纯函数）：quote 缺失/短于 6 字符/归一后不是用户原话子串 → unverified（不回退、不放行）；
- * 正文自指插件 → self-ref；正文像命令/工具输出/任务书/过程自述 → noise。
+ * 硬闸（纯函数）：引文溯源是唯一强闸——quote 缺失/短于 6 字符/归一后不是用户原话子串 → unverified（不回退、不放行）；
+ * 引文验过后正文只拦结构性垃圾（commit hash/代码围栏），用户原话里的命令、路径、任务书词都算事实。
  * shadow 模式把命中的候选也放行，只返回 gated 供记账。
  */
 export function applyExtractionGate(candidates: ExtractionCandidate[], userText: string, mode: ExtractionGateMode): ExtractionGateResult {
@@ -300,11 +290,9 @@ export function applyExtractionGate(candidates: ExtractionCandidate[], userText:
     const reason: ExtractionGateReason | null =
       quote.length < 6 || !user.includes(quote)
         ? "unverified"
-        : BODY_SELF_REF_RE.test(candidate.body)
-          ? "self-ref"
-          : isProcessNoise(candidate.body)
-            ? "noise"
-            : null;
+        : STRUCTURAL_NOISE_RES.some((re) => re.test(candidate.body))
+          ? "noise"
+          : null;
     if (reason) gated.push({ candidate, reason });
     if (!reason || mode === "shadow") accepted.push(candidate);
   }
