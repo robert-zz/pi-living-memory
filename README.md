@@ -34,7 +34,7 @@ sends the tail of each conversation to *your own* model provider for memory extr
 (`LIVING_MEMORY_EXTRACT=0` disables). Every side effect is spelled out under
 [Before installing: default behavior](#before-installing-default-behavior).
 
-**Tests** - `bun tests/run.ts`: 72 cases, 315 assertions, all against a temporary HOME -
+**Tests** - `bun tests/run.ts`: 74 cases, 330 assertions, all against a temporary HOME -
 never your real store.
 
 **Dependencies** - `typebox` and `@earendil-works/*` come from the Pi host. They are declared
@@ -253,7 +253,7 @@ score = confidence * 0.40                  # self-rating contributes at most 40%
 ## Tests
 
 ```bash
-bun tests/run.ts            # all (72 cases / 315 assertions, about 5s)
+bun tests/run.ts            # all (74 cases / 330 assertions, about 5s)
 bun tests/run.ts --only brief
 bun tests/run.ts --list
 ```

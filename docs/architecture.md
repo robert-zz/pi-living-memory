@@ -60,6 +60,7 @@ flowchart TB
     RC[recovery/]
     AL[activity.log]
     XF[extract-failures.jsonl]
+    XG[extract-gates.jsonl]
     AR[archive/<br/>旧 MEMORY · SCRATCHPAD · daily]
   end
 
@@ -205,10 +206,12 @@ flowchart TD
   G -->|超时| Z3[放弃本次]
   G -->|正常| H{解析 JSON 数组}
   H -->|no-json / parse-failed| XF[extract-failures.jsonl<br/>留原文片段]
-  H -->|成功| I[逐条过滤<br/>自指 · 过程性 · 工程实现]
-  I --> J[findConflicting 去重]
-  J --> K[writeEntry status=inference]
-  K --> L[activity.log: auto-extract created]
+  H -->|成功| I[normalizeExtractionItems<br/>缺失字段 / 自指 subject 过滤]
+  I --> J{applyExtractionGate<br/>引文溯源 + 结构性垃圾}
+  J -->|unverified / noise| XG[extract-gates.jsonl<br/>enforce 拦下 · shadow 只记]
+  J -->|通过| K[findConflicting 去重]
+  K --> L[writeEntry status=inference]
+  L --> M[activity.log: auto-extract created]
 ```
 
 `session_before_compact` 会再触发一次同样的流水线——对话将被摘要化之前，先把还没落库的候选捞出来，防压缩丢失。

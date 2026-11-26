@@ -77,10 +77,9 @@ export const CASES: Meta[] = [
   { id: "extract-gate-quote-foreign", title: "抽取硬闸：quote 来自 assistant/任务书 → unverified", seed: "empty" },
   { id: "extract-gate-quote-verbatim", title: "抽取硬闸：用户原话逐字 quote 正常 create", seed: "empty" },
   { id: "extract-gate-noise-command", title: "抽取硬闸：正文只拦结构性垃圾（围栏/hash）", seed: "empty" },
-  { id: "extract-gate-noise-process", title: "抽取硬闸：过程自述正文 → noise", seed: "empty" },
   { id: "extract-gate-selfref-body", title: "抽取硬闸：正文含插件 token 放行（引文优先）", seed: "empty" },
-  { id: "extract-gate-quote-fixtures", title: "抽取硬闸：6 条真实正文（命令/路径/任务书词）全部 create", seed: "empty" },
-  { id: "extract-gate-structural", title: "抽取硬闸：hash/围栏仍拦，任务书词组合只作辅助判定", seed: "empty" },
+  { id: "extract-gate-quote-fixtures", title: "抽取硬闸：6 条真实正文配真实用户回合，全部 create", seed: "empty" },
+  { id: "extract-gate-structural", title: "抽取硬闸：任务书文本引文不实 → unverified，正文任务书词不拦", seed: "empty" },
   { id: "extract-gate-process-verified", title: "抽取硬闸：过程自述在引文验过后不拦", seed: "empty" },
   { id: "extract-gate-mode", title: "抽取硬闸：enforce 拦下 / shadow 只记录", seed: "empty" },
   { id: "extract-gate-ledger", title: "抽取硬闸：台账滚动保留 200 条", seed: "empty" },
@@ -1336,22 +1335,18 @@ async function body(id: string, home: string) {
       return;
     }
     case "extract-gate-noise-command": {
-      const { isProcessNoise, applyExtractionGate } = await import("./under-test/src/extract.ts");
-      ok("``` 围栏 → noise", isProcessNoise("```json\n[]\n```"));
-      ok("40 位 commit hash → noise", isProcessNoise("commit 0123456789abcdef0123456789abcdef01234567"));
-      ok("命令/路径正文不再是噪声（用户可能原话提及）", !isProcessNoise("pnpm build 通过") && !isProcessNoise("$ bun tests/run.ts") && !isProcessNoise("改动在 extensions/src/extract.ts"));
+      const { applyExtractionGate } = await import("./under-test/src/extract.ts");
       const user = "以后发布前先跑一次 pnpm build。";
-      const candidates = [{ kind: "decision", subject: "发布步骤", body: "禁 git add -A / 只 commit 不 push", confidence: 0.9, quote: "以后发布前先跑一次" }];
+      const allowedBody = "禁 git add -A / 只 commit 不 push";
+      const candidates = [
+        { kind: "decision", subject: "命令片段", body: "```json\n[]\n```", confidence: 0.9, quote: "以后发布前先跑一次" },
+        { kind: "decision", subject: "提交 hash", body: "commit 0123456789abcdef0123456789abcdef01234567", confidence: 0.9, quote: "以后发布前先跑一次" },
+        { kind: "decision", subject: "发布步骤", body: allowedBody, confidence: 0.9, quote: "以后发布前先跑一次" },
+      ];
       const g = applyExtractionGate(candidates, user, "enforce");
-      ok("quote 合法时命令正文放行（不再按 token 误杀）", g.accepted.length === 1 && g.gated.length === 0, JSON.stringify(g));
-      return;
-    }
-    case "extract-gate-noise-process": {
-      const { isProcessNoise } = await import("./under-test/src/extract.ts");
-      ok("「我已把索引改好并验证」→ noise", isProcessNoise("我已把索引改好并验证"));
-      ok("「本轮跑了三次测试」→ noise", isProcessNoise("本轮跑了三次测试"));
-      ok("普通用户事实不误伤", !isProcessNoise("用户偏好先给结论再给依据"), "用户偏好先给结论再给依据");
-      ok("引用用户原话的偏好不被过程规则误伤", !isProcessNoise("周报先写结论，再列数据"), "周报先写结论，再列数据");
+      ok("正文含代码围栏 → noise", g.gated[0]?.reason === "noise", JSON.stringify(g.gated[0]));
+      ok("正文含 40 位 commit hash → noise", g.gated[1]?.reason === "noise", JSON.stringify(g.gated[1]));
+      ok("命令/路径正文引文验过后放行", g.accepted.length === 1 && g.accepted[0]?.body === allowedBody, JSON.stringify(g.gated));
       return;
     }
     case "extract-gate-selfref-body": {
@@ -1365,60 +1360,93 @@ async function body(id: string, home: string) {
       const g = applyExtractionGate(candidates, user, "enforce");
       ok("正文 extensions/src/... 不再被闸", g.accepted.some((c) => c.body.includes("extensions/src/")), JSON.stringify(g.gated));
       ok("正文 LIVING_MEMORY_ / living_memory( 不再被闸", g.accepted.length === 3 && g.gated.length === 0, JSON.stringify(g.gated));
-      ok("插件 token 只在 subject 讲自身时于归一阶段过滤", g.accepted.every((c) => !c.subject.includes("LIVING_MEMORY")));
       return;
     }
     case "extract-gate-quote-fixtures": {
-      const { applyExtractionGate, decideExtractionBatch } = await import("./under-test/src/extract.ts");
+      const { userTurnsText, applyExtractionGate, decideExtractionBatch } = await import("./under-test/src/extract.ts");
       const fixtures = [
-        { subject: "vault 里 git add 铁律", body: "vault 里禁止 git add -A / git add .：会被其它并行会话未提交的改动混入…铁律=git add 逐个列具体路径", quote: "vault 里禁止 git add -A" },
-        { subject: "git commit 确认纪律", body: "所有 git commit 必须先经用户确认才能提交：agent 只改动+暂存…git push 同理需用户确认", quote: "所有 git commit 必须先经用户确认" },
-        { subject: "itsfun 仓 push 纪律", body: "itsfun 仓永远不执行 git push（提交须用户确认，push 由用户自己处理）", quote: "itsfun 仓永远不执行 git push" },
-        { subject: "对外文本纯文本版", body: "用户要求：对外文本必须附纯文本版、不带 markdown；多处出现必须一致", quote: "对外文本必须附纯文本版" },
-        { subject: "输入法习惯", body: "用户输入法习惯用双拼，输入框默认全角", quote: "用户输入法习惯用双拼" },
-        { subject: "Upwork 岗位发现渠道", body: "Upwork 岗位发现改走公开 SEO 页扫描而非 Google site: 搜索：脚本 vault/20_Concepts/…/upwork-scan.ts", quote: "Upwork 岗位发现改走公开 SEO 页扫描" },
+        {
+          subject: "vault 里 git add 铁律",
+          body: "vault 里禁止 git add -A / git add .：会被其它并行会话未提交的改动混入…铁律=git add 逐个列具体路径",
+          quote: "vault 里禁止 git add -A",
+          user: "记一下：vault 里禁止 git add -A / git add .，会被其它并行会话未提交的改动混入。",
+        },
+        {
+          subject: "git commit 确认纪律",
+          body: "所有 git commit 必须先经用户确认才能提交：agent 只改动+暂存…git push 同理需用户确认",
+          quote: "所有 git commit 必须先经用户确认",
+          user: "以后都这样：所有 git commit 必须先经用户确认才能提交，push 也一样。",
+        },
+        {
+          subject: "itsfun 仓 push 纪律",
+          body: "itsfun 仓永远不执行 git push（提交须用户确认，push 由用户自己处理）",
+          quote: "itsfun 仓永远不执行 git push",
+          user: "记一下：itsfun 仓永远不执行 git push，提交也须我先确认。",
+        },
+        {
+          subject: "对外文本纯文本版",
+          body: "用户要求：对外文本必须附纯文本版、不带 markdown；多处出现必须一致",
+          quote: "对外文本必须附纯文本版",
+          user: "以后都这样：对外文本必须附纯文本版、不带 markdown，多处出现也要一致。",
+        },
+        {
+          subject: "输入法习惯",
+          body: "用户输入法习惯用双拼，输入框默认全角",
+          quote: "用户输入法习惯用双拼",
+          user: "补充一条：用户输入法习惯用双拼，输入框默认全角。",
+        },
+        {
+          subject: "Upwork 岗位发现渠道",
+          body: "Upwork 岗位发现改走公开 SEO 页扫描而非 Google site: 搜索：脚本 vault/20_Concepts/…/upwork-scan.ts",
+          quote: "Upwork 岗位发现改走公开 SEO 页扫描",
+          user: "记一下：Upwork 岗位发现改走公开 SEO 页扫描，不再用 Google site: 搜索。",
+        },
       ];
-      const user = `${fixtures.map((f) => f.quote).join("。")}。`;
+      const msgs = fixtures.map((f) => ({ role: "user", content: f.user }));
+      ok("每条引文都出自各自的用户回合", fixtures.every((f) => f.user.includes(f.quote)));
+      ok("用户回合是带过渡语的自然句子，不是引文拼接", fixtures.every((f) => f.user.length > f.quote.length));
       const candidates = fixtures.map((f, i) => ({ kind: i === 4 ? "preference" : "decision", subject: f.subject, body: f.body, confidence: 0.9, quote: f.quote }));
-      const g = applyExtractionGate(candidates, user, "enforce");
+      const g = applyExtractionGate(candidates, userTurnsText(msgs), "enforce");
       ok("6 条真实正文全部放行", g.accepted.length === 6, JSON.stringify(g.gated.map((x) => x.reason)));
-      ok("0 条被闸", g.gated.length === 0, JSON.stringify(g.gated.map((x) => x.candidate.subject)));
       const decisions = decideExtractionBatch(g.accepted, () => false);
       ok("6 条全部 verdict=create", decisions.length === 6 && decisions.every((d) => d.verdict === "create"), JSON.stringify(decisions.map((d) => d.verdict)));
-      for (const f of fixtures) ok(`正文逐字保留：${f.subject}`, decisions.some((d) => d.candidate.body === f.body));
+      for (const f of fixtures) {
+        const d = decisions.find((x) => x.candidate.subject === f.subject);
+        ok(`正文逐字保留：${f.subject}`, d?.candidate.body === f.body, d?.candidate.body?.slice(0, 48));
+      }
       return;
     }
     case "extract-gate-structural": {
-      const { isProcessNoise, applyExtractionGate } = await import("./under-test/src/extract.ts");
+      const { applyExtractionGate } = await import("./under-test/src/extract.ts");
       const user = "以后发布前先跑一次 pnpm build。";
+      const taskbookBody = "背景：发布；要求：先跑测试；验收标准：全绿";
       const candidates = [
-        { kind: "decision", subject: "发布步骤", body: "提交 0123456789abcdef0123456789abcdef01234567 后再发布", confidence: 0.9, quote: "以后发布前先跑一次 pnpm build" },
-        { kind: "decision", subject: "命令片段", body: "```\nbun tests/run.ts\n```", confidence: 0.9, quote: "以后发布前先跑一次" },
         { kind: "decision", subject: "任务书约束", body: "禁 git add -A / 只 commit 不 push", confidence: 0.9, quote: "禁 git add -A / 只 commit 不 push" },
+        { kind: "decision", subject: "任务书正文", body: taskbookBody, confidence: 0.9, quote: "以后发布前先跑一次 pnpm build" },
       ];
       const g = applyExtractionGate(candidates, user, "enforce");
-      ok("正文含 40 位 hash → noise", g.gated[0]?.reason === "noise", JSON.stringify(g.gated[0]));
-      ok("正文含代码围栏 → noise", g.gated[1]?.reason === "noise", JSON.stringify(g.gated[1]));
-      ok("任务书 quote 不在用户原话 → unverified（先于正文规则）", g.gated[2]?.reason === "unverified", JSON.stringify(g.gated[2]));
-      ok("「禁 git add -A…」本身不是结构性垃圾", !isProcessNoise("禁 git add -A / 只 commit 不 push"));
-      ok("≥2 个不同任务书词 → noise（辅助判定）", isProcessNoise("背景：发布；要求：先跑测试；验收标准：全绿"));
-      ok("行首 # + 任务书词 + 冒号 → noise", isProcessNoise("# 要求：先跑测试"));
-      ok("单个任务书词（用户要求…）不算任务书", !isProcessNoise("用户要求：对外文本带纯文本版"));
+      ok("任务书文本对不上用户原话 → unverified（先于正文规则）", g.gated[0]?.reason === "unverified", JSON.stringify(g.gated[0]));
+      ok("正文含任务书词但引文验过 → 放行（正文只拦结构性垃圾）", g.accepted.length === 1 && g.accepted[0]?.body === taskbookBody, JSON.stringify(g.gated));
+      const noiseVsUnverified = applyExtractionGate(
+        [{ kind: "decision", subject: "双命中", body: "```\ncommit 0123456789abcdef0123456789abcdef01234567\n```", confidence: 0.9, quote: "用户没说过的话" }],
+        user,
+        "enforce",
+      );
+      ok("引文不实 + 正文垃圾 → 记 unverified（不因正文误记 noise）", noiseVsUnverified.gated[0]?.reason === "unverified", JSON.stringify(noiseVsUnverified.gated[0]));
       return;
     }
     case "extract-gate-process-verified": {
-      const { isProcessNoise, applyExtractionGate, decideExtractionBatch } = await import("./under-test/src/extract.ts");
+      const { applyExtractionGate, decideExtractionBatch } = await import("./under-test/src/extract.ts");
       const user = "我已把索引改好并验证，以后都这样收尾。";
       const candidates = [{ kind: "preference", subject: "收尾方式", body: "我已把索引改好并验证", confidence: 0.9, quote: "我已把索引改好并验证" }];
       const g = applyExtractionGate(candidates, user, "enforce");
-      ok("引文验过后过程自述正文不被拦", g.accepted.length === 1 && g.gated.length === 0, JSON.stringify(g.gated));
-      ok("同句单独判定仍是过程自述", isProcessNoise("我已把索引改好并验证"));
+      ok("过程自述正文（引文为用户原话）不被拦", g.accepted.length === 1 && g.gated.length === 0, JSON.stringify(g.gated));
       ok("放行后 verdict=create", decideExtractionBatch(g.accepted, () => false)[0]?.verdict === "create");
       return;
     }
     case "extract-gate-mode": {
       const L = await load(home, AUTO_OFF);
-      const { applyExtractionGate, recordExtractionGates } = await import("./under-test/src/extract.ts");
+      const { applyExtractionGate, decideExtractionBatch, recordExtractionGates } = await import("./under-test/src/extract.ts");
       const user = "以后发布前先跑一次 pnpm build。";
       const candidates = [{ kind: "decision", subject: "用户决策", body: "commit 0123456789abcdef0123456789abcdef01234567", confidence: 0.9, quote: "以后发布前先跑一次" }];
       const enforce = applyExtractionGate(candidates, user, "enforce");
@@ -1429,9 +1457,14 @@ async function body(id: string, home: string) {
         shadow.accepted.length === 1 && shadow.gated.length === 1 && shadow.accepted[0] === candidates[0],
         JSON.stringify({ accepted: shadow.accepted.length, gated: shadow.gated.length }),
       );
+      const enforced = decideExtractionBatch(enforce.accepted, () => false);
+      const shadowed = decideExtractionBatch(shadow.accepted, () => false);
+      ok("enforce：被闸候选不产生决策", enforced.length === 0, `${enforced.length} 条决策`);
+      ok("shadow：被闸候选照常产生决策", shadowed.length === 1 && shadowed[0]?.verdict === "create", JSON.stringify(shadowed.map((d) => d.verdict)));
       recordExtractionGates(shadow.gated, "agent_settled", "shadow");
       const ledger = read(home, "extract-gates.jsonl").trim().split("\n").filter(Boolean);
       ok("shadow 被闸仍写台账", ledger.length === 1 && JSON.parse(ledger[0]).reason === "noise", ledger[0]?.slice(0, 80));
+      ok("台账行记 mode=shadow", JSON.parse(ledger[0]).mode === "shadow", ledger[0]?.slice(0, 80));
       const act = read(home, "activity.log");
       ok("activity.log 记 gated 行并标注 shadow", act.includes("auto-extract gated noise") && act.includes("shadow"), act.slice(-120));
       ok("闸不碰手工写入的 remember 路径", out(await L.call("remember", { kind: "decision", subject: "手工写入验证", text: "手工 remember 不走抽取闸", basis: "explicit", source: "test" })).includes("已记入"));
@@ -1444,8 +1477,17 @@ async function body(id: string, home: string) {
       const lines = read(home, "extract-gates.jsonl").trim().split("\n").filter(Boolean);
       ok("台账最多保留 200 条", lines.length === 200, `${lines.length} 行`);
       const row = JSON.parse(lines[lines.length - 1]);
-      ok("行字段齐全", ["ts", "reason", "kind", "subject", "body", "quote"].every((k) => Object.hasOwn(row, k)), Object.keys(row).join(","));
+      ok("行字段齐全", ["ts", "reason", "mode", "kind", "subject", "body", "quote"].every((k) => Object.hasOwn(row, k)), Object.keys(row).join(","));
+      ok("台账行记 mode=enforce", row.mode === "enforce", row.mode);
       ok("body 截到 120 字符 / quote 截到 60", row.body.length === 120 && row.quote.length === 60, `${row.body.length}/${row.quote.length}`);
+      const emoji = { ...candidate, body: "😀".repeat(200), quote: "🎯".repeat(80) };
+      recordExtractionGates([{ candidate: emoji, reason: "noise" }], "test", "enforce");
+      const emojiRow = JSON.parse(read(home, "extract-gates.jsonl").trim().split("\n").filter(Boolean).pop() ?? "{}");
+      ok(
+        "emoji 按码点截断，不切半个代理对",
+        [...emojiRow.body].length === 120 && [...emojiRow.quote].length === 60 && !/[\uD800-\uDBFF]$/.test(emojiRow.body),
+        `${[...emojiRow.body].length}/${[...emojiRow.quote].length}`,
+      );
       return;
     }
     case "extract-gate-health": {
@@ -1454,14 +1496,20 @@ async function body(id: string, home: string) {
       fs.writeFileSync(
         path.join(mem(home), "extract-gates.jsonl"),
         [
-          JSON.stringify({ ts: hoursAgo(1), reason: "noise", kind: "decision", subject: "发布步骤", body: "禁 git add -A / 只 commit 不 push", quote: "以后发布前先跑一次" }),
-          JSON.stringify({ ts: hoursAgo(2), reason: "unverified", kind: "preference", subject: "报价承诺", body: "早先承诺：周五给报价单", quote: "周五前给报价单" }),
-          JSON.stringify({ ts: hoursAgo(24 * 9), reason: "noise", kind: "decision", subject: "旧记录", body: "旧记录正文", quote: "旧引文" }),
+          JSON.stringify({ ts: hoursAgo(1), reason: "noise", mode: "enforce", kind: "decision", subject: "发布步骤", body: "禁 git add -A / 只 commit 不 push", quote: "以后发布前先跑一次" }),
+          JSON.stringify({ ts: hoursAgo(2), reason: "unverified", mode: "shadow", kind: "preference", subject: "报价承诺", body: "早先承诺：周五给报价单", quote: "周五前给报价单" }),
+          JSON.stringify({ ts: hoursAgo(24 * 9), reason: "noise", mode: "enforce", kind: "decision", subject: "旧记录", body: "旧记录正文", quote: "旧引文" }),
+          "null",
+          JSON.stringify({ ts: 123 }),
+          JSON.stringify({ ts: hoursAgo(1), reason: "noise", kind: "decision", subject: "缺 mode 的旧行", body: "缺 mode 的旧行正文", quote: "旧引文" }),
         ].join("\n") + "\n",
       );
       const t = out(await L.call("living_memory", { source: "extract" }));
       ok("无失败时也输出被闸统计", /gate：近 7 天被闸 2 条/.test(t), t.split("\n").find((l) => l.startsWith("gate：")));
+      ok("按 mode 拆分 enforce / shadow", /enforce 1 \/ shadow 1/.test(t), t.match(/gate：[^\n]*/)?.[0]?.slice(0, 120));
       ok("原因分布按 reason 计数", /noise 1/.test(t) && /unverified 1/.test(t), t.match(/（[^）]*）/)?.[0]);
+      ok("畸形台账行只丢该行，不拖垮整段输出", t.includes("台账共 3 条"), t.match(/台账共 \d+ 条/)?.[0]);
+      ok("缺 mode 的旧行按形状校验丢弃", !t.includes("缺 mode 的旧行"), t.split("\n").slice(-2).join(" | ").slice(0, 100));
       ok("列出最近 5 条正文摘要", t.includes("禁 git add -A") && t.includes("早先承诺"), t.split("\n").slice(-3).join(" | ").slice(0, 120));
       return;
     }

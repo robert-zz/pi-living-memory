@@ -27,7 +27,7 @@ flowchart LR
 | 高置信与证据驱动自动转正；relation / needs-confirm 永久排除 | ✅ |
 | 模块化拆分，依赖单向无环，模块顶层零 IO | ✅ |
 | npm 发布、GitHub Actions、包内 docs | ✅ |
-| 回归测试 72 用例 / 315 断言 | ✅ |
+| 回归测试 74 用例 / 330 断言 | ✅ |
 
 ## v0.2.x — 召回质量基线与工程补齐
 
@@ -94,7 +94,7 @@ event_at: 2026-11-10      # 事件实际发生时间
 
 ### 4. 抽取硬闸（已完成）
 
-- 候选必须附用户原话逐字引文：引文溯源是唯一强闸（`unverified`）；引文验过后正文只拦结构性垃圾（40 位 commit hash / 代码围栏 → `noise`），命令、路径、任务书词等主题 token 一律放行。过程自述只保留为辅助判定，不在引文验过后的强闸路径生效；纯函数 `applyExtractionGate` 在归一之后、落库决策之前生效，手工 `remember` 不走闸；
+- 候选必须附用户原话逐字引文：引文溯源是唯一强闸（`unverified`）；引文验过后正文只拦结构性垃圾（40 位 commit hash / 代码围栏 → `noise`），命令、路径、任务书词等主题 token 一律放行。过程自述不再单独判定，引文验过即按事实放行、对不上则走 `unverified`；纯函数 `applyExtractionGate` 在归一之后、落库决策之前生效，手工 `remember` 不走闸；
 - 被闸台账 `extract-gates.jsonl`（最近 200 条）+ `source=extract` 近 7 天条数与原因分布；`LIVING_MEMORY_EXTRACT_GATE=0` 影子模式只记录不拦，用于上线前观察误杀。
 
 ## v0.4 — 按失败类型选择检索增强

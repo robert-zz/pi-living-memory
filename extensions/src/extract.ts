@@ -258,22 +258,10 @@ export type ExtractionGateResult = { accepted: ExtractionCandidate[]; gated: Ext
 
 /** 结构性垃圾：40 位十六进制（commit hash）与代码围栏；引文验过后仍拦，其余正文一律放行 */
 const STRUCTURAL_NOISE_RES: RegExp[] = [/[0-9a-f]{40}/i, /```/];
-/** 任务书结构词：单独出现常是用户事实（如「用户要求…」），≥2 个不同词才判任务书正文 */
-const TASKBOOK_WORD_RE = /(背景|输入|要求|输出格式|验收标准|禁止事项|委派|子代理|任务书|worker|scout|reviewer)/gi;
-/** 行首 # 或 ** 加任务书词与冒号：任务书小节标题（如「# 要求：…」） */
-const TASKBOOK_HEADING_RE = /^[#*]+\s*(背景|输入|要求|输出格式|验收标准|禁止事项|委派|子代理|任务书|worker|scout|reviewer)\s*[:：]/im;
-/** 正文以这些词开头且含实现动词 → 助手/工具的过程自述，不是用户事实（仅 isProcessNoise 判定，硬闸不套用） */
-const PROCESS_LEAD_RE = /^(?:已|我|我们|现已|刚才|本轮|这一轮)/;
-const PROCESS_VERB_RE = /(改|修|跑|推|提交|删|加|验证|复验|实现)/;
 
-export function isProcessNoise(body: string): boolean {
-  const b = String(body ?? "").trim();
-  if (!b) return false;
-  if (STRUCTURAL_NOISE_RES.some((re) => re.test(b))) return true;
-  if (TASKBOOK_HEADING_RE.test(b)) return true;
-  const words = new Set((b.match(TASKBOOK_WORD_RE) ?? []).map((w) => w.toLowerCase()));
-  if (words.size >= 2) return true;
-  return PROCESS_LEAD_RE.test(b) && PROCESS_VERB_RE.test(b);
+/** 按码点截断：emoji / 代理对不会被切成半个字符 */
+function truncateCodePoints(s: string, n: number): string {
+  return [...s].slice(0, n).join("");
 }
 
 /**
@@ -299,13 +287,30 @@ export function applyExtractionGate(candidates: ExtractionCandidate[], userText:
   return { accepted, gated };
 }
 
+/** 台账行（JSON 行形状，字段名与落盘键逐字一致） */
 interface ExtractGateRow {
-  ts: string;
-  reason: ExtractionGateReason;
-  kind: string;
-  subject: string;
-  body: string;
-  quote: string;
+  "ts": string;
+  "reason": ExtractionGateReason;
+  "mode": ExtractionGateMode;
+  "kind": string;
+  "subject": string;
+  "body": string;
+  "quote": string;
+}
+
+/** 台账行形状校验：畸形 JSON（null/数字/缺字段）只丢该行，不让 source=extract 整体抛错 */
+function isExtractGateRow(value: unknown): value is ExtractGateRow {
+  if (!value || typeof value !== "object") return false;
+  const o = value as Record<string, unknown>;
+  return (
+    typeof o.ts === "string" &&
+    (o.reason === "unverified" || o.reason === "noise") &&
+    (o.mode === "enforce" || o.mode === "shadow") &&
+    typeof o.kind === "string" &&
+    typeof o.subject === "string" &&
+    typeof o.body === "string" &&
+    typeof o.quote === "string"
+  );
 }
 
 function extractGateRows(): ExtractGateRow[] {
@@ -316,7 +321,8 @@ function extractGateRows(): ExtractGateRow[] {
       .filter(Boolean)
       .flatMap((l) => {
         try {
-          return [JSON.parse(l) as ExtractGateRow];
+          const parsed: unknown = JSON.parse(l);
+          return isExtractGateRow(parsed) ? [parsed] : [];
         } catch {
           return [];
         }
@@ -339,22 +345,24 @@ export function recordExtractionGates(gated: ExtractionGateHit[], trigger: strin
           JSON.stringify({
             ts,
             reason,
+            mode,
             kind: candidate.kind,
             subject: candidate.subject,
-            body: candidate.body.slice(0, 120),
-            quote: (candidate.quote ?? "").slice(0, 60),
+            body: truncateCodePoints(candidate.body, 120),
+            quote: truncateCodePoints(candidate.quote ?? "", 60),
           }),
         );
       writeAtomic(EXTRACT_GATE_FILE, `${(lines.length > EXTRACT_GATE_KEEP ? lines.slice(-EXTRACT_GATE_KEEP) : lines).join("\n")}\n`);
     });
+    // activity 也在同一 try 内：台账观测失败不能掀翻 runExtraction（否则会被记成 request-failed）
+    for (const { candidate, reason } of gated)
+      logger.activity(`auto-extract gated ${reason} kind=${candidate.kind} subject=${candidate.subject} (${trigger}${mode === "shadow" ? " shadow" : ""})`);
   } catch {
     /* 观测失败不影响抽取主流程 */
   }
-  for (const { candidate, reason } of gated)
-    logger.activity(`auto-extract gated ${reason} kind=${candidate.kind} subject=${candidate.subject} (${trigger}${mode === "shadow" ? " shadow" : ""})`);
 }
 
-/** source=extract 追加段：近 7 日被闸条数 + 原因分布 + 最近 5 条正文摘要 */
+/** source=extract 追加段：近 7 日被闸条数（enforce/shadow）+ 原因分布 + 最近 5 条正文摘要 */
 function gateHealthText(): string {
   const rows = extractGateRows();
   const since = clock.now() - 7 * 86400e3;
@@ -363,14 +371,19 @@ function gateHealthText(): string {
     return Number.isFinite(t) && t >= since;
   });
   const byReason = new Map<string, number>();
-  for (const r of week) byReason.set(r.reason, (byReason.get(r.reason) ?? 0) + 1);
+  const byMode = new Map<string, number>();
+  for (const r of week) {
+    byReason.set(r.reason, (byReason.get(r.reason) ?? 0) + 1);
+    byMode.set(r.mode, (byMode.get(r.mode) ?? 0) + 1);
+  }
+  const modes = `enforce ${byMode.get("enforce") ?? 0} / shadow ${byMode.get("shadow") ?? 0}`;
   const counts = [...byReason.entries()].map(([r, n]) => `${r} ${n}`).join(" / ");
   const recent = rows
     .slice(-5)
     .reverse()
     .map((r) => `· ${r.ts.slice(5, 16).replace("T", " ")} ${r.reason} — ${r.body}`);
   return [
-    `gate：近 7 天被闸 ${week.length} 条${counts ? `（${counts}）` : ""}，台账共 ${rows.length} 条（上限 ${EXTRACT_GATE_KEEP}）`,
+    `gate：近 7 天被闸 ${week.length} 条（${modes}${counts ? `；${counts}` : ""}），台账共 ${rows.length} 条（上限 ${EXTRACT_GATE_KEEP}）`,
     ...recent,
   ].join("\n");
 }
@@ -487,7 +500,7 @@ async function runExtraction(text: string, userText: string, ctx: any, reason: s
         status: autoFact ? "confirmed" : "inference",
         subject,
         scope: "global",
-        source: `auto-extract ${today()}（${reason} 模型抽取，${autoFact ? "高置信度自动按事实" : "待用户确认"}）`,
+        source: `auto-extract ${today()}（${reason} 模型抽取，${autoFact ? "高置信度自动按事实" : "待用户确认"}；引文「${truncateCodePoints(normalizeSpace(candidate.quote ?? ""), 40)}」）`,
         obtained_at: new Date(clock.now()).toISOString(),
         confirmed_at: autoFact ? new Date(clock.now()).toISOString() : "",
         expires_at: "",
