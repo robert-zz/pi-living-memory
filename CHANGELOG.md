@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.0] - 2026-11-26
+
+抽取硬闸：默认拦下无源候选（手工 `remember` 与既有条目不受影响）。
+
+- **抽取硬闸默认开启**：`LIVING_MEMORY_EXTRACT_GATE` 未设或非 `0` 即 `enforce`，候选过闸后才落库；设 `0` 进入 `shadow`（影子模式：照记台账、候选照常落库，用于上线前评估误杀率）。被闸候选按 `unverified`（引文缺失 / 短于 6 字符 / 折叠空白后对不上用户原话）或 `noise`（正文含 40 位 commit hash 或代码围栏）记入 `~/.pi/agent/memory/extract-gates.jsonl`（带 `mode`，保留最近 200 条）并写 `activity.log`；enforce 只跳过该候选、不删既有数据，`source=extract` 显示近 7 天被闸条数、enforce/shadow 分布、原因分布与最近 5 条正文摘要。通过闸的条目在 `source` 里追加最多 40 码点的引文摘录。
+- **判定全部由本地代码完成，不新增 LLM 调用**：`applyExtractionGate`（纯函数）做引文溯源与结构性垃圾判定；`normalizeExtractionItems` 负责 kind 白名单、subject/body 非空、自指 subject 过滤（`isPluginInternal`，含记忆系统自身）与同批去重；引文比较使用完整用户轮次（`userTurnsText`，不受 6000 字符截断）与空白折叠后的子串。凭证与未证实敏感推断仍由抽取提示词禁入，本版未加正则启发式。
+- **保守降级**：引文溯源不通过一律记 `unverified` 并舍弃，不回退、不猜测；只有引文验过的正文才检查结构性垃圾，命令、路径、任务书词等不再据此拦截（宁可漏判，不把用户原话误杀成过程噪声）。
+- **配置**：新增 `Config.extractGate`，从 `LIVING_MEMORY_EXTRACT_GATE` 读取（默认 `true`，`"0"` 为 `false`）；README / README.zh-CN 环境变量表与 `docs/guide.md`、`docs/architecture.md`、`docs/roadmap.md` 同步硬闸规则、影子模式与 `extract-gates.jsonl`。
+- **文档与测试**：`README.md` Quick start 章节重排（安装 / 存储 / 工具 / 命令 / 环境变量 / 默认行为 / 测试 / 依赖分段）；README 与 README.zh-CN 测试计数更新为 74 用例 / 330 断言（原 61 / 276），`docs/development.md` 同步。新增硬闸配置三态、引文缺失 / 过短 / 来自 assistant 或任务书、结构性垃圾、台账滚动与行形状校验、`source=extract` 统计、码点截断等回归用例。
+
 ## [0.2.3] - 2026-11-25
 
 工程质量：类型门禁、双语文档与 demo（工具返回值统一补宿主必填 `details`，模型可见文本不变）。

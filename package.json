@@ -1,6 +1,6 @@
 {
   "name": "pi-living-memory",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "Pi extension: durable long-term memory with lifecycle metadata — entries with kind/status/scope/expiry, TODO + SUMMARY docs, derived indexes, and a read-only archive fallback",
   "repository": {
     "type": "git",
