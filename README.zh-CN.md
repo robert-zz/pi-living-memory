@@ -23,7 +23,7 @@ Pi 扩展：**带生命周期的长期记忆**。事实不再是散文段落，�
 pi install npm:pi-living-memory
 
 # git（钉 tag，可回滚）
-pi install git:github.com/robert-zz/pi-living-memory@v0.2.2
+pi install git:github.com/robert-zz/pi-living-memory@v0.3.0
 
 # 本地目录（开发用，不复制）
 pi install /path/to/pi-living-memory

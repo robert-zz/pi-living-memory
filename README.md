@@ -56,7 +56,7 @@ All data is plain markdown + JSON: no database, no network reporting. To wipe it
 pi install npm:pi-living-memory
 
 # git (pinned tag, easy rollback)
-pi install git:github.com/robert-zz/pi-living-memory@v0.2.2
+pi install git:github.com/robert-zz/pi-living-memory@v0.3.0
 
 # local directory (development, no copy)
 pi install /path/to/pi-living-memory
